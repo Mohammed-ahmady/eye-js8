@@ -11,9 +11,9 @@ const CONFIG = {
     DWELL_TIME: 1500, // ms to trigger click
     DWELL_RADIUS: 30, // pixels
     CALIBRATION_DWELL: 2500, // ms for each calibration point
+    COOLDOWN_TIME: 1000, // ms after click
     MAGNETIC_RADIUS: 100, // pixels to trigger snap
-    BREAKAWAY_DISTANCE: 180, // pixels to break magnetic bond
-    COOLDOWN_TIME: 1500, // ms after click to prevent repeats
+    RELEASE_RADIUS: 200, // pixels from target to break lock
 };
 
 // --- State Management ---
@@ -34,7 +34,6 @@ let state = {
     currentPointIndex: 0,
     isLocked: false,
     lockedTarget: null,
-    lastBlinkTime: 0,
     isPaused: false
 };
 
@@ -79,21 +78,13 @@ function init() {
     elements.pauseBtn.addEventListener('click', togglePause);
     elements.debugMeshBtn.addEventListener('click', toggleDebugMesh);
 
-    // Initialize WebGazer with specific tracker for stable landmarks
+    // Initialize WebGazer with specific tracker
     webgazer.setTracker("clmtrackr");
 
     webgazer.setGazeListener((data, elapsedTime) => {
         if (data == null) return;
         handleGaze(data.x, data.y);
     }).begin();
-
-    // Calibration Safeguard: Override recordScreenPosition to prevent 
-    // polluting calibration during magnetic snaps
-    const originalRecord = webgazer.recordScreenPosition;
-    webgazer.recordScreenPosition = function (x, y) {
-        if (state.isLocked) return; // Don't train while snapped
-        return originalRecord.apply(this, arguments);
-    };
 
     // Hide video preview and face mesh for clean UI
     webgazer.showVideoPreview(false).showPredictionPoints(false).applyKalmanFilter(true);
@@ -124,29 +115,33 @@ function handleGaze(x, y) {
         let targetX = state.smoothedGaze.x;
         let targetY = state.smoothedGaze.y;
 
-        // --- Magnetic Snapping & Breakaway Logic ---
+        // Magnetic Snapping Logic
         if (!state.isLocked) {
             const nearest = findNearestClickable(targetX, targetY);
             if (nearest) {
                 state.isLocked = true;
                 state.lockedTarget = nearest;
+                targetX = nearest.x;
+                targetY = nearest.y;
                 elements.statusText.textContent = 'MAGNETIC LOCK: ON';
                 elements.statusText.classList.add('locked');
                 console.log('Magnetic Snap Engaged');
             }
         } else {
-            // Calculate "Breakaway Force"
-            // Use RAW gaze (x, y) vs SNAP target to see if user is pulling away
-            const rawDist = Math.sqrt(Math.pow(x - state.lockedTarget.x, 2) + Math.pow(y - state.lockedTarget.y, 2));
+            // Check if gaze has moved far enough away to break the lock (Look-Away Force)
+            const distFromTarget = Math.sqrt(
+                Math.pow(state.smoothedGaze.x - state.lockedTarget.x, 2) +
+                Math.pow(state.smoothedGaze.y - state.lockedTarget.y, 2)
+            );
 
-            if (rawDist > CONFIG.BREAKAWAY_DISTANCE) {
+            if (distFromTarget > CONFIG.RELEASE_RADIUS) {
                 state.isLocked = false;
                 state.lockedTarget = null;
-                elements.statusText.textContent = 'System Active - Search for Targets...';
+                elements.statusText.textContent = 'System Active - Link Broken';
                 elements.statusText.classList.remove('locked');
-                console.log('Breakaway: Lock Released');
+                console.log('Magnetic Snap Released by Look-Away Force');
 
-                // Visual feedback for breakaway (blue flash)
+                // Visual feedback for release (blue flash)
                 elements.dwellIndicator.style.borderColor = '#3498db';
                 setTimeout(() => {
                     elements.dwellIndicator.style.borderColor = 'rgba(46, 213, 115, 0.5)';
@@ -218,63 +213,18 @@ function togglePause() {
     }
 }
 
-// --- Dwell-to-Click Logic ---
-function handleDwell(x, y) {
-    const now = Date.now();
-
-    // Check click cooldown strictly
-    if (now - state.lastClickTime < CONFIG.COOLDOWN_TIME || state.isPaused) {
-        elements.dwellIndicator.style.display = 'none';
-        state.dwellStart = null; // Clear dwell if in cooldown
-        return;
-    }
-
-    elements.dwellIndicator.style.display = 'block';
-    elements.dwellIndicator.style.left = `${x}px`;
-    elements.dwellIndicator.style.top = `${y}px`;
-
-    const dist = Math.sqrt(Math.pow(x - state.dwellPoint.x, 2) + Math.pow(y - state.dwellPoint.y, 2));
-
-    if (dist < CONFIG.DWELL_RADIUS) {
-        if (!state.dwellStart) {
-            state.dwellStart = now;
-            state.dwellPoint = { x, y };
-        }
-
-        const elapsed = now - state.dwellStart;
-        const progress = Math.min((elapsed / CONFIG.DWELL_TIME) * 100, 100);
-        elements.dwellProgress.style.clipPath = `inset(${100 - progress}% 0 0 0)`;
-
-        if (elapsed >= CONFIG.DWELL_TIME && (now - state.lastClickTime > CONFIG.COOLDOWN_TIME)) {
-            triggerClick();
-        }
+function toggleDebugMesh() {
+    // WebGazer 2.1.0 uses VideoPreview to show face alignment info
+    const isShowing = elements.debugMeshBtn.classList.contains('active');
+    if (isShowing) {
+        webgazer.showVideoPreview(false).showPredictionPoints(false);
+        elements.debugMeshBtn.textContent = 'Show Face Feedback';
+        elements.debugMeshBtn.classList.remove('active');
     } else {
-        state.dwellStart = null;
-        state.dwellPoint = { x, y };
-        elements.dwellProgress.style.clipPath = `inset(100% 0 0 0)`;
+        webgazer.showVideoPreview(true).showPredictionPoints(true);
+        elements.debugMeshBtn.textContent = 'Hide Face Feedback';
+        elements.debugMeshBtn.classList.add('active');
     }
-}
-
-function triggerClick() {
-    state.lastClickTime = Date.now(); // Set immediately to prevent multiple triggers
-    state.dwellStart = null;
-    elements.dwellProgress.style.clipPath = `inset(100% 0 0 0)`;
-
-    state.socket.emit('trigger_click', {
-        x: state.smoothedGaze.x,
-        y: state.smoothedGaze.y,
-        timestamp: Date.now()
-    });
-
-    // Visual feedback for click (white flash)
-    elements.dwellIndicator.style.borderColor = '#ffffff';
-    elements.dwellIndicator.style.boxShadow = '0 0 20px rgba(255, 255, 255, 0.8)';
-    console.log('OS-Level Click Triggered');
-
-    setTimeout(() => {
-        elements.dwellIndicator.style.borderColor = 'rgba(46, 213, 115, 0.5)';
-        elements.dwellIndicator.style.boxShadow = 'none';
-    }, 200);
 }
 
 // --- Calibration Logic ---
@@ -325,6 +275,71 @@ function calibratePoint(pctX, pctY) {
             }, CONFIG.CALIBRATION_DWELL);
         }, 500);
     });
+}
+
+// --- Dwell-to-Click Logic ---
+function handleDwell(x, y) {
+    const now = Date.now();
+
+    // Check cooldown to prevent accidental double-clicks
+    if (now - state.lastClickTime < CONFIG.COOLDOWN_TIME) {
+        elements.dwellIndicator.style.display = 'none';
+        return;
+    }
+
+    // Update indicator position to follow gaze
+    elements.dwellIndicator.style.display = 'block';
+    elements.dwellIndicator.style.left = `${x}px`;
+    elements.dwellIndicator.style.top = `${y}px`;
+
+    // Check if gaze is within radius of the dwell point
+    const dist = Math.sqrt(Math.pow(x - state.dwellPoint.x, 2) + Math.pow(y - state.dwellPoint.y, 2));
+
+    if (dist < CONFIG.DWELL_RADIUS) {
+        if (!state.dwellStart) {
+            state.dwellStart = now;
+            state.dwellPoint = { x, y };
+        }
+
+        const elapsed = now - state.dwellStart;
+        const progress = Math.min((elapsed / CONFIG.DWELL_TIME) * 100, 100);
+
+        // Update visual progress (filling from bottom up)
+        elements.dwellProgress.style.clipPath = `inset(${100 - progress}% 0 0 0)`;
+
+        if (elapsed >= CONFIG.DWELL_TIME) {
+            triggerClick();
+        }
+    } else {
+        // Reset dwell if gaze moves too far
+        state.dwellStart = null;
+        state.dwellPoint = { x, y };
+        elements.dwellProgress.style.clipPath = `inset(100% 0 0 0)`;
+    }
+}
+
+function triggerClick() {
+    // Send click command to backend for OS-level execution
+    state.socket.emit('trigger_click', {
+        x: state.smoothedGaze.x,
+        y: state.smoothedGaze.y,
+        timestamp: Date.now()
+    });
+
+    state.lastClickTime = Date.now();
+    state.dwellStart = null;
+    elements.dwellProgress.style.clipPath = `inset(100% 0 0 0)`;
+
+    // Visual feedback for click (white flash)
+    elements.dwellIndicator.style.borderColor = '#ffffff';
+    elements.dwellIndicator.style.boxShadow = '0 0 20px rgba(255, 255, 255, 0.8)';
+
+    console.log('OS-Level Click Triggered');
+
+    setTimeout(() => {
+        elements.dwellIndicator.style.borderColor = 'rgba(46, 213, 115, 0.5)';
+        elements.dwellIndicator.style.boxShadow = 'none';
+    }, 200);
 }
 
 // Start the application
