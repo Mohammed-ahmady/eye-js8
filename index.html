@@ -116,6 +116,55 @@
             background: #26af5f;
         }
 
+        #pause-btn {
+            background: #ff6348;
+            position: fixed;
+            top: 10px;
+            right: 10px;
+            z-index: 2000;
+        }
+
+        #pause-btn.paused {
+            background: #2ed573;
+        }
+
+        #test-area {
+            display: none;
+            position: fixed;
+            top: 10%;
+            left: 10%;
+            width: 80%;
+            height: 70%;
+            grid-template-columns: repeat(4, 1fr);
+            grid-template-rows: repeat(4, 1fr);
+            gap: 20px;
+            padding: 20px;
+            pointer-events: none;
+            /* Let gaze pass through the container */
+            z-index: 100;
+        }
+
+        .test-button {
+            background: rgba(255, 255, 255, 0.1);
+            border: 2px dashed rgba(255, 255, 255, 0.3);
+            border-radius: 12px;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            font-size: 14px;
+            color: rgba(255, 255, 255, 0.5);
+            pointer-events: auto;
+            /* Buttons are clickable */
+            transition: all 0.3s ease;
+        }
+
+        .test-button:hover {
+            background: rgba(46, 213, 115, 0.2);
+            border-color: #2ed573;
+            color: #2ed573;
+            transform: scale(1.05);
+        }
+
         #status-text.locked {
             color: #f1c40f;
             text-shadow: 0 0 5px rgba(241, 196, 15, 0.5);
@@ -145,6 +194,28 @@
     <div id="status-bar">
         Status: <span id="status-text">Initializing...</span> |
         Server: <span id="server-status">Disconnected</span>
+    </div>
+
+    <button id="pause-btn" style="display: none;">Pause Gaze Control</button>
+
+    <div id="test-area">
+        <!-- Generates 16 test buttons -->
+        <div class="test-button">Target 1</div>
+        <div class="test-button">Target 2</div>
+        <div class="test-button">Target 3</div>
+        <div class="test-button">Target 4</div>
+        <div class="test-button">Target 5</div>
+        <div class="test-button">Target 6</div>
+        <div class="test-button">Target 7</div>
+        <div class="test-button">Target 8</div>
+        <div class="test-button">Target 9</div>
+        <div class="test-button">Target 10</div>
+        <div class="test-button">Target 11</div>
+        <div class="test-button">Target 12</div>
+        <div class="test-button">Target 13</div>
+        <div class="test-button">Target 14</div>
+        <div class="test-button">Target 15</div>
+        <div class="test-button">Target 16</div>
     </div>
 
     <script src="app.js"></script>

@@ -34,7 +34,8 @@ let state = {
     currentPointIndex: 0,
     isLocked: false,
     lockedTarget: null,
-    lastBlinkTime: 0
+    lastBlinkTime: 0,
+    isPaused: false
 };
 
 // --- UI Elements ---
@@ -45,7 +46,9 @@ const elements = {
     statusText: document.getElementById('status-text'),
     serverStatus: document.getElementById('server-status'),
     dwellIndicator: document.getElementById('dwell-indicator'),
-    dwellProgress: document.getElementById('dwell-progress')
+    dwellProgress: document.getElementById('dwell-progress'),
+    testArea: document.getElementById('test-area'),
+    pauseBtn: document.getElementById('pause-btn')
 };
 
 // --- Initialization ---
@@ -72,6 +75,7 @@ function init() {
     });
 
     elements.startBtn.addEventListener('click', startCalibration);
+    elements.pauseBtn.addEventListener('click', togglePause);
 
     // Initialize WebGazer
     webgazer.setGazeListener((data, elapsedTime) => {
@@ -113,6 +117,11 @@ function handleGaze(x, y) {
     }
 
     if (state.isCalibrated) {
+        if (state.isPaused) {
+            elements.dwellIndicator.style.display = 'none';
+            return;
+        }
+
         let targetX = state.smoothedGaze.x;
         let targetY = state.smoothedGaze.y;
 
@@ -150,12 +159,18 @@ function handleGaze(x, y) {
 
 // --- Magnetic Snapping ---
 function findNearestClickable(x, y) {
-    // Find clickable elements: buttons, links, inputs
-    const clickables = document.querySelectorAll('button, a, input[type="button"], input[type="submit"], [role="button"]');
+    if (state.isPaused) return null;
+
+    // Find clickable elements: buttons, links, inputs, and our test buttons
+    const clickables = document.querySelectorAll('button:not(#pause-btn), a, input[type="button"], input[type="submit"], [role="button"], .test-button');
     let nearest = null;
     let minSourceDist = CONFIG.MAGNETIC_RADIUS;
 
     clickables.forEach(el => {
+        // Special check: ignore invisible elements or the pause button itself
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden') return;
+
         const rect = el.getBoundingClientRect();
         const centerX = rect.left + rect.width / 2;
         const centerY = rect.top + rect.height / 2;
@@ -168,6 +183,24 @@ function findNearestClickable(x, y) {
     });
 
     return nearest;
+}
+
+// --- Pause Logic ---
+function togglePause() {
+    state.isPaused = !state.isPaused;
+
+    if (state.isPaused) {
+        elements.pauseBtn.textContent = 'Resume Gaze Control';
+        elements.pauseBtn.classList.add('paused');
+        elements.statusText.textContent = 'PAUSED - Free Mouse Use';
+        elements.statusText.classList.remove('locked');
+        state.isLocked = false;
+        state.lockedTarget = null;
+    } else {
+        elements.pauseBtn.textContent = 'Pause Gaze Control';
+        elements.pauseBtn.classList.remove('paused');
+        elements.statusText.textContent = 'System Active - OS Control Enabled';
+    }
 }
 
 // --- Blink Detection ---
@@ -224,6 +257,10 @@ async function startCalibration() {
     elements.dot.style.display = 'none';
     elements.statusText.textContent = 'System Active - OS Control Enabled';
     elements.dwellIndicator.style.display = 'block';
+
+    // Show test controls after calibration
+    elements.testArea.style.display = 'grid';
+    elements.pauseBtn.style.display = 'block';
 }
 
 function calibratePoint(pctX, pctY) {
