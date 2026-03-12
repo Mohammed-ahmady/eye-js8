@@ -74,6 +74,26 @@ function init() {
         elements.serverStatus.style.color = '#ff6348';
     });
 
+    state.socket.on('snapped', (data) => {
+        state.isLocked = true;
+        elements.statusText.textContent = `MAGNETIC LOCK: ${data.name || 'ON'}`;
+        elements.statusText.classList.add('locked');
+        console.log('OS-Level Snap Engaged');
+    });
+
+    state.socket.on('released', () => {
+        state.isLocked = false;
+        elements.statusText.textContent = 'System Active - Link Broken';
+        elements.statusText.classList.remove('locked');
+        console.log('OS-Level Snap Released');
+
+        // Visual feedback for release (blue flash)
+        elements.dwellIndicator.style.borderColor = '#3498db';
+        setTimeout(() => {
+            elements.dwellIndicator.style.borderColor = 'rgba(46, 213, 115, 0.5)';
+        }, 400);
+    });
+
     elements.startBtn.addEventListener('click', startCalibration);
     elements.pauseBtn.addEventListener('click', togglePause);
     elements.debugMeshBtn.addEventListener('click', toggleDebugMesh);
@@ -115,43 +135,8 @@ function handleGaze(x, y) {
         let targetX = state.smoothedGaze.x;
         let targetY = state.smoothedGaze.y;
 
-        // Magnetic Snapping Logic
-        if (!state.isLocked) {
-            const nearest = findNearestClickable(targetX, targetY);
-            if (nearest) {
-                state.isLocked = true;
-                state.lockedTarget = nearest;
-                targetX = nearest.x;
-                targetY = nearest.y;
-                elements.statusText.textContent = 'MAGNETIC LOCK: ON';
-                elements.statusText.classList.add('locked');
-                console.log('Magnetic Snap Engaged');
-            }
-        } else {
-            // Check if gaze has moved far enough away to break the lock (Look-Away Force)
-            const distFromTarget = Math.sqrt(
-                Math.pow(state.smoothedGaze.x - state.lockedTarget.x, 2) +
-                Math.pow(state.smoothedGaze.y - state.lockedTarget.y, 2)
-            );
-
-            if (distFromTarget > CONFIG.RELEASE_RADIUS) {
-                state.isLocked = false;
-                state.lockedTarget = null;
-                elements.statusText.textContent = 'System Active - Link Broken';
-                elements.statusText.classList.remove('locked');
-                console.log('Magnetic Snap Released by Look-Away Force');
-
-                // Visual feedback for release (blue flash)
-                elements.dwellIndicator.style.borderColor = '#3498db';
-                setTimeout(() => {
-                    elements.dwellIndicator.style.borderColor = 'rgba(46, 213, 115, 0.5)';
-                }, 400);
-            } else {
-                // Stay locked to the target
-                targetX = state.lockedTarget.x;
-                targetY = state.lockedTarget.y;
-            }
-        }
+        // Note: Snapping logic is now handled in the backend (server.py)
+        // for full OS-level support. We just send raw smoothed coordinates.
 
         // Send coordinates to backend
         state.socket.emit('move_mouse', {
@@ -162,7 +147,8 @@ function handleGaze(x, y) {
             timestamp: Date.now()
         });
 
-        // Handle Dwell-to-Click (using the snapped/target coordinates)
+        // Handle Dwell-to-Click
+        // Use smoothed gaze for indicator (visual feedback only)
         handleDwell(targetX, targetY);
     }
 }
