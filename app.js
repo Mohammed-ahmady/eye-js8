@@ -12,6 +12,8 @@ const CONFIG = {
     DWELL_RADIUS: 30, // pixels
     CALIBRATION_DWELL: 2500, // ms for each calibration point
     COOLDOWN_TIME: 1000, // ms after click
+    MAGNETIC_RADIUS: 100, // pixels to trigger snap
+    BLINK_THRESHOLD: 0.35, // Sensitivity for blink detection
 };
 
 // --- State Management ---
@@ -29,7 +31,10 @@ let state = {
         { x: 10, y: 50 }, { x: 50, y: 50 }, { x: 90, y: 50 },
         { x: 10, y: 90 }, { x: 50, y: 90 }, { x: 90, y: 90 }
     ],
-    currentPointIndex: 0
+    currentPointIndex: 0,
+    isLocked: false,
+    lockedTarget: null,
+    lastBlinkTime: 0
 };
 
 // --- UI Elements ---
@@ -47,7 +52,7 @@ const elements = {
 function init() {
     // Initialize Socket.IO for OS-level communication
     state.socket = io(CONFIG.SERVER_URL);
-    
+
     state.socket.on('connect', () => {
         elements.serverStatus.textContent = 'Connected';
         elements.serverStatus.style.color = '#2ed573';
@@ -71,12 +76,25 @@ function init() {
     // Initialize WebGazer
     webgazer.setGazeListener((data, elapsedTime) => {
         if (data == null) return;
+
+        // Blink Detection
+        const prediction = webgazer.getCurrentPrediction();
+        if (prediction && prediction.allPredictions && prediction.allPredictions.length > 0) {
+            // WebGazer uses clmtrackr internally, we can attempt to get landmarks
+            // Note: This relies on WebGazer's internal tracker state
+            const tracker = webgazer.getTracker().getTracker();
+            const positions = tracker.getCurrentPosition();
+            if (positions) {
+                checkBlink(positions);
+            }
+        }
+
         handleGaze(data.x, data.y);
     }).begin();
 
     // Hide video preview and face mesh for clean UI
     webgazer.showVideoPreview(false).showPredictionPoints(false).applyKalmanFilter(true);
-    
+
     elements.statusText.textContent = 'Ready to Calibrate';
 }
 
@@ -95,18 +113,97 @@ function handleGaze(x, y) {
     }
 
     if (state.isCalibrated) {
-        // Send smoothed coordinates to backend for OS-level mouse control
-        // Include full viewport dimensions for accurate screen mapping
+        let targetX = state.smoothedGaze.x;
+        let targetY = state.smoothedGaze.y;
+
+        // Magnetic Snapping Logic
+        if (!state.isLocked) {
+            const nearest = findNearestClickable(targetX, targetY);
+            if (nearest) {
+                state.isLocked = true;
+                state.lockedTarget = nearest;
+                targetX = nearest.x;
+                targetY = nearest.y;
+                elements.statusText.textContent = 'MAGNETIC LOCK: ON';
+                elements.statusText.classList.add('locked');
+                console.log('Magnetic Snap Engaged');
+            }
+        } else {
+            // Stay locked to the target
+            targetX = state.lockedTarget.x;
+            targetY = state.lockedTarget.y;
+        }
+
+        // Send coordinates to backend
         state.socket.emit('move_mouse', {
-            x: state.smoothedGaze.x,
-            y: state.smoothedGaze.y,
+            x: targetX,
+            y: targetY,
             viewport_width: window.innerWidth,
             viewport_height: window.innerHeight,
             timestamp: Date.now()
         });
 
-        // Handle Dwell-to-Click for OS-level clicks
-        handleDwell(state.smoothedGaze.x, state.smoothedGaze.y);
+        // Handle Dwell-to-Click (using the snapped/target coordinates)
+        handleDwell(targetX, targetY);
+    }
+}
+
+// --- Magnetic Snapping ---
+function findNearestClickable(x, y) {
+    // Find clickable elements: buttons, links, inputs
+    const clickables = document.querySelectorAll('button, a, input[type="button"], input[type="submit"], [role="button"]');
+    let nearest = null;
+    let minSourceDist = CONFIG.MAGNETIC_RADIUS;
+
+    clickables.forEach(el => {
+        const rect = el.getBoundingClientRect();
+        const centerX = rect.left + rect.width / 2;
+        const centerY = rect.top + rect.height / 2;
+        const dist = Math.sqrt(Math.pow(x - centerX, 2) + Math.pow(y - centerY, 2));
+
+        if (dist < minSourceDist) {
+            minSourceDist = dist;
+            nearest = { x: centerX, y: centerY, element: el };
+        }
+    });
+
+    return nearest;
+}
+
+// --- Blink Detection ---
+function checkBlink(positions) {
+    // Positions mapping for clmtrackr:
+    // Left eye: 23, 63, 24, 64, 25, 65, 26, 66
+    // Right eye: 30, 69, 31, 70, 28, 67, 29, 68
+
+    // Calculate eye openness (distance between lids / width of eye)
+    const leftDist = Math.sqrt(Math.pow(positions[24][0] - positions[26][0], 2) + Math.pow(positions[24][1] - positions[26][1], 2));
+    const leftWidth = Math.sqrt(Math.pow(positions[23][0] - positions[25][0], 2) + Math.pow(positions[23][1] - positions[25][1], 2));
+    const leftRatio = leftDist / leftWidth;
+
+    const rightDist = Math.sqrt(Math.pow(positions[29][0] - positions[31][0], 2) + Math.pow(positions[29][1] - positions[31][1], 2));
+    const rightWidth = Math.sqrt(Math.pow(positions[28][0] - positions[30][0], 2) + Math.pow(positions[30][1] - positions[28][1], 2));
+    const rightRatio = rightDist / rightWidth;
+
+    // If both eyes are significantly closed
+    if (leftRatio < CONFIG.BLINK_THRESHOLD && rightRatio < CONFIG.BLINK_THRESHOLD) {
+        const now = Date.now();
+        if (now - state.lastBlinkTime > 1000) { // Cooldown for release
+            if (state.isLocked) {
+                state.isLocked = false;
+                state.lockedTarget = null;
+                state.lastBlinkTime = now;
+                elements.statusText.textContent = 'System Active - Search for Targets...';
+                elements.statusText.classList.remove('locked');
+                console.log('Magnetic Snap Released by Blink');
+
+                // Visual feedback for release (red flash)
+                elements.dwellIndicator.style.borderColor = '#ff4757';
+                setTimeout(() => {
+                    elements.dwellIndicator.style.borderColor = 'rgba(46, 213, 115, 0.5)';
+                }, 300);
+            }
+        }
     }
 }
 
@@ -141,7 +238,7 @@ function calibratePoint(pctX, pctY) {
         // Wait for user to look at the dot
         setTimeout(() => {
             elements.dot.classList.add('filling');
-            
+
             // Record position multiple times during dwell to train WebGazer
             const interval = setInterval(() => {
                 webgazer.recordScreenPosition(x, y);
@@ -158,7 +255,7 @@ function calibratePoint(pctX, pctY) {
 // --- Dwell-to-Click Logic ---
 function handleDwell(x, y) {
     const now = Date.now();
-    
+
     // Check cooldown to prevent accidental double-clicks
     if (now - state.lastClickTime < CONFIG.COOLDOWN_TIME) {
         elements.dwellIndicator.style.display = 'none';
@@ -181,7 +278,7 @@ function handleDwell(x, y) {
 
         const elapsed = now - state.dwellStart;
         const progress = Math.min((elapsed / CONFIG.DWELL_TIME) * 100, 100);
-        
+
         // Update visual progress (filling from bottom up)
         elements.dwellProgress.style.clipPath = `inset(${100 - progress}% 0 0 0)`;
 
@@ -203,17 +300,17 @@ function triggerClick() {
         y: state.smoothedGaze.y,
         timestamp: Date.now()
     });
-    
+
     state.lastClickTime = Date.now();
     state.dwellStart = null;
     elements.dwellProgress.style.clipPath = `inset(100% 0 0 0)`;
-    
+
     // Visual feedback for click (white flash)
     elements.dwellIndicator.style.borderColor = '#ffffff';
     elements.dwellIndicator.style.boxShadow = '0 0 20px rgba(255, 255, 255, 0.8)';
-    
+
     console.log('OS-Level Click Triggered');
-    
+
     setTimeout(() => {
         elements.dwellIndicator.style.borderColor = 'rgba(46, 213, 115, 0.5)';
         elements.dwellIndicator.style.boxShadow = 'none';

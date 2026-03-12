@@ -1,5 +1,6 @@
 <!DOCTYPE html>
 <html lang="en">
+
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
@@ -114,15 +115,23 @@
         button:hover {
             background: #26af5f;
         }
+
+        #status-text.locked {
+            color: #f1c40f;
+            text-shadow: 0 0 5px rgba(241, 196, 15, 0.5);
+            font-weight: bold;
+        }
     </style>
 </head>
+
 <body>
 
     <div id="calibration-overlay">
         <div id="instructions">
             <h1>Gaze Mouse System</h1>
             <p>This system allows you to control your computer's mouse using only your eyes.</p>
-            <p><strong>Calibration:</strong> A red dot will appear at 9 points. Please look directly at the dot and keep your head still until it turns green and moves.</p>
+            <p><strong>Calibration:</strong> A red dot will appear at 9 points. Please look directly at the dot and keep
+                your head still until it turns green and moves.</p>
             <button id="start-btn">Start Calibration</button>
         </div>
     </div>
@@ -134,10 +143,11 @@
     </div>
 
     <div id="status-bar">
-        Status: <span id="status-text">Initializing...</span> | 
+        Status: <span id="status-text">Initializing...</span> |
         Server: <span id="server-status">Disconnected</span>
     </div>
 
     <script src="app.js"></script>
 </body>
+
 </html>
