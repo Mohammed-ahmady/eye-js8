@@ -48,7 +48,8 @@ const elements = {
     dwellIndicator: document.getElementById('dwell-indicator'),
     dwellProgress: document.getElementById('dwell-progress'),
     testArea: document.getElementById('test-area'),
-    pauseBtn: document.getElementById('pause-btn')
+    pauseBtn: document.getElementById('pause-btn'),
+    debugMeshBtn: document.getElementById('debug-mesh-btn')
 };
 
 // --- Initialization ---
@@ -76,21 +77,25 @@ function init() {
 
     elements.startBtn.addEventListener('click', startCalibration);
     elements.pauseBtn.addEventListener('click', togglePause);
+    elements.debugMeshBtn.addEventListener('click', toggleDebugMesh);
 
-    // Initialize WebGazer
+    // Initialize WebGazer with specific tracker for stable landmarks
+    webgazer.setTracker("clmtrackr");
+
     webgazer.setGazeListener((data, elapsedTime) => {
         if (data == null) return;
 
-        // Blink Detection
-        const prediction = webgazer.getCurrentPrediction();
-        if (prediction && prediction.allPredictions && prediction.allPredictions.length > 0) {
-            // WebGazer uses clmtrackr internally, we can attempt to get landmarks
-            // Note: This relies on WebGazer's internal tracker state
-            const tracker = webgazer.getTracker().getTracker();
-            const positions = tracker.getCurrentPosition();
-            if (positions) {
-                checkBlink(positions);
+        // Blink Detection (Using EAR - Eye Aspect Ratio)
+        try {
+            const tracker = webgazer.getTracker();
+            if (tracker && tracker.clm) {
+                const positions = tracker.clm.getCurrentPosition();
+                if (positions) {
+                    checkBlink(positions);
+                }
             }
+        } catch (e) {
+            console.warn("Blink check failed:", e);
         }
 
         handleGaze(data.x, data.y);
@@ -203,38 +208,51 @@ function togglePause() {
     }
 }
 
+function toggleDebugMesh() {
+    // WebGazer 2.1.0 uses VideoPreview to show face alignment info
+    const isShowing = elements.debugMeshBtn.classList.contains('active');
+    if (isShowing) {
+        webgazer.showVideoPreview(false).showPredictionPoints(false);
+        elements.debugMeshBtn.textContent = 'Show Face Feedback';
+        elements.debugMeshBtn.classList.remove('active');
+    } else {
+        webgazer.showVideoPreview(true).showPredictionPoints(true);
+        elements.debugMeshBtn.textContent = 'Hide Face Feedback';
+        elements.debugMeshBtn.classList.add('active');
+    }
+}
+
 // --- Blink Detection ---
 function checkBlink(positions) {
-    // Positions mapping for clmtrackr:
-    // Left eye: 23, 63, 24, 64, 25, 65, 26, 66
-    // Right eye: 30, 69, 31, 70, 28, 67, 29, 68
+    // EAR (Eye Aspect Ratio) implementation for clmtrackr landmarks
+    const getDist = (p1, p2) => Math.sqrt(Math.pow(positions[p1][0] - positions[p2][0], 2) + Math.pow(positions[p1][1] - positions[p2][1], 2));
 
-    // Calculate eye openness (distance between lids / width of eye)
-    const leftDist = Math.sqrt(Math.pow(positions[24][0] - positions[26][0], 2) + Math.pow(positions[24][1] - positions[26][1], 2));
-    const leftWidth = Math.sqrt(Math.pow(positions[23][0] - positions[25][0], 2) + Math.pow(positions[23][1] - positions[25][1], 2));
-    const leftRatio = leftDist / leftWidth;
+    const leftEAR = (getDist(63, 66) + getDist(24, 26) + getDist(64, 65)) / (3 * getDist(23, 25));
+    const rightEAR = (getDist(69, 68) + getDist(29, 31) + getDist(70, 67)) / (3 * getDist(30, 28));
 
-    const rightDist = Math.sqrt(Math.pow(positions[29][0] - positions[31][0], 2) + Math.pow(positions[29][1] - positions[31][1], 2));
-    const rightWidth = Math.sqrt(Math.pow(positions[28][0] - positions[30][0], 2) + Math.pow(positions[30][1] - positions[28][1], 2));
-    const rightRatio = rightDist / rightWidth;
+    // Throttled logging for calibration
+    if (!window._lastBlinkLog || Date.now() - window._lastBlinkLog > 500) {
+        console.log(`[EAR Debug] L: ${leftEAR.toFixed(3)} | R: ${rightEAR.toFixed(3)} | Threshold: ${CONFIG.BLINK_THRESHOLD}`);
+        window._lastBlinkLog = Date.now();
+    }
 
-    // If both eyes are significantly closed
-    if (leftRatio < CONFIG.BLINK_THRESHOLD && rightRatio < CONFIG.BLINK_THRESHOLD) {
+    // Both eyes closed
+    if (leftEAR < CONFIG.BLINK_THRESHOLD && rightEAR < CONFIG.BLINK_THRESHOLD) {
         const now = Date.now();
-        if (now - state.lastBlinkTime > 1000) { // Cooldown for release
+        if (now - state.lastBlinkTime > 1200) { // release cooldown
             if (state.isLocked) {
                 state.isLocked = false;
                 state.lockedTarget = null;
                 state.lastBlinkTime = now;
                 elements.statusText.textContent = 'System Active - Search for Targets...';
                 elements.statusText.classList.remove('locked');
-                console.log('Magnetic Snap Released by Blink');
+                console.log('!!! BLINK RELEASE TRIGGERED !!!');
 
                 // Visual feedback for release (red flash)
                 elements.dwellIndicator.style.borderColor = '#ff4757';
                 setTimeout(() => {
                     elements.dwellIndicator.style.borderColor = 'rgba(46, 213, 115, 0.5)';
-                }, 300);
+                }, 500);
             }
         }
     }
@@ -261,6 +279,7 @@ async function startCalibration() {
     // Show test controls after calibration
     elements.testArea.style.display = 'grid';
     elements.pauseBtn.style.display = 'block';
+    elements.debugMeshBtn.style.display = 'block';
 }
 
 function calibratePoint(pctX, pctY) {
