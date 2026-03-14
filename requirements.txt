@@ -2,3 +2,4 @@ python-socketio
 eventlet
 pyautogui
 screeninfo
+# Note: pyatspi depends on system libraries (sudo apt install python3-pyatspi)

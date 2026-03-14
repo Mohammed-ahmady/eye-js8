@@ -7,7 +7,7 @@
 // --- Configuration ---
 const CONFIG = {
     SERVER_URL: 'http://localhost:5000',
-    SMOOTHING_FACTOR: 0.2, // Alpha for EMA (0.15 to 0.3)
+    SMOOTHING_FACTOR: 0.1, // Increased smoothing (lower alpha)
     DWELL_TIME: 1500, // ms to trigger click
     DWELL_RADIUS: 30, // pixels
     CALIBRATION_DWELL: 2500, // ms for each calibration point
@@ -34,7 +34,8 @@ let state = {
     currentPointIndex: 0,
     isLocked: false,
     lockedTarget: null,
-    isPaused: false
+    isPaused: false,
+    lastEmitTime: 0 // For throttling
 };
 
 // --- UI Elements ---
@@ -46,7 +47,6 @@ const elements = {
     serverStatus: document.getElementById('server-status'),
     dwellIndicator: document.getElementById('dwell-indicator'),
     dwellProgress: document.getElementById('dwell-progress'),
-    testArea: document.getElementById('test-area'),
     pauseBtn: document.getElementById('pause-btn'),
     debugMeshBtn: document.getElementById('debug-mesh-btn')
 };
@@ -98,9 +98,8 @@ function init() {
     elements.pauseBtn.addEventListener('click', togglePause);
     elements.debugMeshBtn.addEventListener('click', toggleDebugMesh);
 
-    // Initialize WebGazer with specific tracker
-    webgazer.setTracker("clmtrackr");
-
+    // Use WebGazer's default bundled tracker (no external model downloads needed)
+    // TFFacemesh requires tfhub.dev which may not work in native desktop wrappers
     webgazer.setGazeListener((data, elapsedTime) => {
         if (data == null) return;
         handleGaze(data.x, data.y);
@@ -114,12 +113,22 @@ function init() {
 
 // --- Gaze Handling & Smoothing ---
 function handleGaze(x, y) {
+    if (isNaN(x) || isNaN(y) || x == null || y == null) {
+        console.error("Invalid gaze data received:", x, y);
+        return;
+    }
+
     state.lastGaze = { x, y };
 
     // Apply Exponential Moving Average (EMA) Smoothing
     // This reduces jitter from micro-saccades
-    state.smoothedGaze.x = (CONFIG.SMOOTHING_FACTOR * x) + ((1 - CONFIG.SMOOTHING_FACTOR) * state.smoothedGaze.x);
-    state.smoothedGaze.y = (CONFIG.SMOOTHING_FACTOR * y) + ((1 - CONFIG.SMOOTHING_FACTOR) * state.smoothedGaze.y);
+    if (isNaN(state.smoothedGaze.x) || isNaN(state.smoothedGaze.y)) {
+        state.smoothedGaze.x = x;
+        state.smoothedGaze.y = y;
+    } else {
+        state.smoothedGaze.x = (CONFIG.SMOOTHING_FACTOR * x) + ((1 - CONFIG.SMOOTHING_FACTOR) * state.smoothedGaze.x);
+        state.smoothedGaze.y = (CONFIG.SMOOTHING_FACTOR * y) + ((1 - CONFIG.SMOOTHING_FACTOR) * state.smoothedGaze.y);
+    }
 
     if (state.isCalibrating) {
         // Calibration logic is handled by the calibration loop
@@ -138,18 +147,24 @@ function handleGaze(x, y) {
         // Note: Snapping logic is now handled in the backend (server.py)
         // for full OS-level support. We just send raw smoothed coordinates.
 
-        // Send coordinates to backend
-        state.socket.emit('move_mouse', {
-            x: targetX,
-            y: targetY,
-            viewport_width: window.innerWidth,
-            viewport_height: window.innerHeight,
-            timestamp: Date.now()
-        });
-
         // Handle Dwell-to-Click
-        // Use smoothed gaze for indicator (visual feedback only)
         handleDwell(targetX, targetY);
+
+        // Throttle Socket Emissions to ~30 FPS (33ms)
+        const now = Date.now();
+        if (now - state.lastEmitTime > 33) {
+            state.socket.emit('move_mouse', {
+                x: targetX,
+                y: targetY,
+                viewport_width: window.innerWidth,
+                viewport_height: window.innerHeight,
+                screen_left: window.screenX || window.screenLeft,
+                screen_top: window.screenY || window.screenTop,
+                device_pixel_ratio: window.devicePixelRatio || 1,
+                timestamp: now
+            });
+            state.lastEmitTime = now;
+        }
     }
 }
 
@@ -231,8 +246,18 @@ async function startCalibration() {
     elements.statusText.textContent = 'System Active - OS Control Enabled';
     elements.dwellIndicator.style.display = 'block';
 
-    // Show test controls after calibration
-    elements.testArea.style.display = 'grid';
+    // Request Wake Lock to prevent browser from throttling the gaze tracker
+    // This keeps JavaScript running at full speed even in the background
+    if ('wakeLock' in navigator) {
+        try {
+            await navigator.wakeLock.request('screen');
+            console.log('Wake Lock acquired — tracker will not be throttled.');
+        } catch (err) {
+            console.log('Wake Lock not available:', err.message);
+        }
+    }
+
+    // Show controls after calibration
     elements.pauseBtn.style.display = 'block';
     elements.debugMeshBtn.style.display = 'block';
 }
