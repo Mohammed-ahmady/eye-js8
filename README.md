@@ -1,4 +1,3 @@
----
 
 # eye-js8 — Gaze-Controlled Mouse (Windows Port)
 
