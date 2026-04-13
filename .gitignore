@@ -9,3 +9,5 @@ windows.zip
 windows/
 chrome_profile/
 gaze_mouse_launcher.pid
+
+face_landmarker.task
