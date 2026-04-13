@@ -1,4 +1,0 @@
-python-socketio
-eventlet
-pyautogui
-screeninfo

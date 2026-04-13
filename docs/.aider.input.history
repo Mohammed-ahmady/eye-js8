@@ -1,0 +1,117 @@
+
+# 2026-04-12 07:03:35.637417
++hi
+
+# 2026-04-12 07:04:08.397794
++list the files in the current directory.
+
+# 2026-04-12 07:06:23.346070
++N
+
+# 2026-04-12 07:06:26.154151
++/add *.py *.js *.html *.css *.json *.txt *.md
+
+# 2026-04-12 07:07:23.850920
++Perform a complete deep analysis of this entire codebase. 
++Go file by file, line by line. For each file provide:
++
++1. PURPOSE — what this file does and its role in the system
++2. IMPORTS & DEPENDENCIES — every library used and why
++3. FUNCTIONS & CLASSES — explain each one in detail
++4. LINE BY LINE LOGIC — walk through the core logic step by step
++5. BUGS & ERRORS — any broken, deprecated, or problematic code
++6. PERFORMANCE ISSUES — bottlenecks, inefficiencies, redundant code
++7. SECURITY ISSUES — any vulnerabilities or unsafe practices
++8. DEAD CODE — unused variables, functions, imports
++9. IMPROVEMENT SUGGESTIONS — specific fixes with code examples
++
++After analyzing all files:
++10. ARCHITECTURE OVERVIEW — how all files connect together
++11. DATA FLOW — how data moves from webcam → gaze detection → mouse control
++12. CRITICAL BUGS — the most urgent things to fix first
++13. PRIORITY ACTION LIST — ordered list of what to fix/improve
++
++This is a Python eye tracking project using:
++- MediaPipe for facial landmark detection
++- OpenCV for webcam feed processing
++- Polynomial regression for gaze-to-screen calibration
++- Mouse control for hands-free accessibility
++- WebSocket or socket server for communication
++
++Be thorough. Do not skip any file or any function.
+
+# 2026-04-12 07:08:32.565409
++n
+
+# 2026-04-12 07:08:35.006105
++bye
+
+# 2026-04-12 07:08:36.850042
++n
+
+# 2026-04-12 07:09:16.014688
++/add *.py *.js *.html
+
+# 2026-04-12 07:09:26.602207
++/add *.py *.js *.html *.css *.json *.txt *.md
+
+# 2026-04-12 07:09:35.069383
++Perform a complete deep analysis of this entire codebase. 
++Go file by file, line by line. For each file provide:
++
++1. PURPOSE — what this file does and its role in the system
++2. IMPORTS & DEPENDENCIES — every library used and why
++3. FUNCTIONS & CLASSES — explain each one in detail
++4. LINE BY LINE LOGIC — walk through the core logic step by step
++5. BUGS & ERRORS — any broken, deprecated, or problematic code
++6. PERFORMANCE ISSUES — bottlenecks, inefficiencies, redundant code
++7. SECURITY ISSUES — any vulnerabilities or unsafe practices
++8. DEAD CODE — unused variables, functions, imports
++9. IMPROVEMENT SUGGESTIONS — specific fixes with code examples
++
++After analyzing all files:
++10. ARCHITECTURE OVERVIEW — how all files connect together
++11. DATA FLOW — how data moves from webcam → gaze detection → mouse control
++12. CRITICAL BUGS — the most urgent things to fix first
++13. PRIORITY ACTION LIST — ordered list of what to fix/improve
++
++This is a Python eye tracking project using:
++- MediaPipe for facial landmark detection
++- OpenCV for webcam feed processing
++- Polynomial regression for gaze-to-screen calibration
++- Mouse control for hands-free accessibility
++- WebSocket or socket server for communication
++
++Be thorough. Do not skip any file or any function.
+
+# 2026-04-12 07:19:29.033982
++/add *.py *.js *.html *.css *.json *.txt *.md
+
+# 2026-04-12 07:19:35.189455
++Perform a complete deep analysis of this entire codebase. 
++Go file by file, line by line. For each file provide:
++
++1. PURPOSE — what this file does and its role in the system
++2. IMPORTS & DEPENDENCIES — every library used and why
++3. FUNCTIONS & CLASSES — explain each one in detail
++4. LINE BY LINE LOGIC — walk through the core logic step by step
++5. BUGS & ERRORS — any broken, deprecated, or problematic code
++6. PERFORMANCE ISSUES — bottlenecks, inefficiencies, redundant code
++7. SECURITY ISSUES — any vulnerabilities or unsafe practices
++8. DEAD CODE — unused variables, functions, imports
++9. IMPROVEMENT SUGGESTIONS — specific fixes with code examples
++
++After analyzing all files:
++10. ARCHITECTURE OVERVIEW — how all files connect together
++11. DATA FLOW — how data moves from webcam → gaze detection → mouse control
++12. CRITICAL BUGS — the most urgent things to fix first
++13. PRIORITY ACTION LIST — ordered list of what to fix/improve
++
++This is a Python eye tracking project using:
++- MediaPipe for facial landmark detection
++- OpenCV for webcam feed processing
++- Polynomial regression for gaze-to-screen calibration
++- Mouse control for hands-free accessibility
++- WebSocket or socket server for communication
++
++Be thorough. Do not skip any file or any function.

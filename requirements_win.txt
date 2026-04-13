@@ -1,0 +1,27 @@
+# Gaze Mouse System — Windows 11 dependencies
+# Install: pip install -r requirements_win.txt
+
+# Socket.IO server + client
+flask
+flask-socketio
+python-socketio[client]
+websocket-client
+
+# Windows system libraries
+pywin32
+pyautogui
+screeninfo
+uiautomation
+
+# PyQt5 for overlays (replaces GTK+Cairo)
+PyQt5
+PyQt5-Qt5
+PyQt5-sip
+
+# Head pose compensation (same as Linux)
+mediapipe>=0.10.0
+opencv-python
+numpy
+
+# Note: Do NOT install eventlet on Windows — use flask-socketio threading mode instead.
+# Note: pyatspi is Linux-only and must NOT be installed on Windows.

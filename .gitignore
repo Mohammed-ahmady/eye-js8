@@ -1,5 +1,11 @@
 venv/
+.venv/
 __pycache__/
 *.pyc
 .DS_Store
 node_modules/
+chrome.log
+windows.zip
+windows/
+chrome_profile/
+gaze_mouse_launcher.pid
