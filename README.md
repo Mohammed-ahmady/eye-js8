@@ -1,11 +1,148 @@
-# eye-js8
 
-OS-Level Mouse Control using Eye Tracking with WebGazer.js.
+# eye-js8 — Gaze-Controlled Mouse (Windows Port)
 
-## Description
-This project implements a system for controlling the operating system's mouse pointer using eye movements captured via a webcam. It uses a bridge architecture to enable OS-level interaction from a browser-based tracker.
+> **Graduation Project — SHA GP24**  
+> Supervisor: Dr. Mohammed Hussien  
+> Platform: Windows 11  
 
-## Setup
-1.  Install dependencies: `pip install -r requirements.txt`
-2.  Start the backend: `./venv/bin/python server.py`
-3.  Open `index.html` in a web browser.
+OS-Level mouse control using eye tracking with WebGazer.js and MediaPipe.  
+Designed as assistive technology for fully paralyzed users.
+
+---
+
+## Branches
+
+| Branch | Platform | Description |
+|--------|----------|-------------|
+| `main` | Linux (Ubuntu) | Original Linux version using Xvfb + AT-SPI |
+| `windows` | Windows 11 | **This branch** — full Windows port |
+
+---
+
+## How It Works
+
+1. Chrome launches hidden offscreen at (-32000, -32000)
+2. WebGazer.js captures webcam frames and predicts gaze coordinates
+3. Gaze coordinates are sent via Socket.IO to the Python backend
+4. Python moves the OS cursor using pyautogui
+5. UIAutomation snaps the cursor to nearby clickable UI elements
+6. A PyQt5 HUD overlay shows the gaze ring and dwell progress
+
+---
+
+## Project Structure
+
+```
+eye-js8/
+├── core/                  # Python backend
+│   ├── server_win.py      # Flask + Socket.IO gaze server
+│   ├── hud_win.py         # PyQt5 HUD overlay
+│   ├── launcher_win.py    # Process launcher
+│   └── calibration_win.py # Calibration overlay
+├── web/                   # Browser frontend
+│   ├── app.js             # WebGazer gaze logic
+│   └── index.html         # Hidden browser page
+├── models/                # TensorFlow.js model files
+│   ├── blazeface/
+│   └── facemesh/
+├── scripts/               # Setup and run scripts
+│   ├── install_win.bat
+│   ├── download_model.bat
+│   └── start.bat
+├── docs/                  # Documentation
+│   └── FIX_LOG.md         # Full bug fix history
+├── linux_reference/       # Original Linux files (reference only)
+├── tests/
+└── face_landmarker.task   # MediaPipe model (download separately)
+```
+
+---
+
+## Setup (Windows 11)
+
+### 1. Install Python dependencies
+```bash
+pip install -r requirements_win.txt
+```
+
+### 2. Download MediaPipe model
+```bash
+scripts\download_model.bat
+```
+
+### 3. Install additional requirements
+```bash
+scripts\install_win.bat
+```
+
+### 4. Run the system
+```bash
+scripts\start.bat
+```
+
+Or directly:
+```bash
+python core\launcher_win.py
+```
+
+---
+
+## Requirements
+
+- Windows 10/11
+- Python 3.10+
+- Google Chrome or Microsoft Edge
+- Webcam
+- NVIDIA or Intel GPU (DirectX 11 support required)
+
+---
+
+## Key Bug Fixes (Windows Port)
+
+| Fix | Impact |
+|-----|--------|
+| Virtual desktop coordinate model | Dual-monitor support (secondary left monitor) |
+| `--use-angle=d3d11` GPU flag | TensorFlow.js WebGL works on Windows |
+| Qt thread safety via QTimer | Eliminates random crashes |
+| UIAutomation off hot path | Removes gaze lag spikes |
+| Kalman filter disabled | Reduces cursor latency |
+| Pose baseline from live head pose | Accurate gaze after head movement |
+| Per-thread COM initialization | UIAutomation works in daemon threads |
+| PID-targeted process cleanup | Safe shutdown without killing other apps |
+
+See `docs/FIX_LOG.md` for full details.
+
+---
+
+## Architecture
+
+```
+[Webcam]
+	↓
+[WebGazer.js in hidden Chrome]
+	↓ Socket.IO (port 5000)
+[server_win.py — Flask backend]
+	↓                    ↓
+[pyautogui]      [UIAutomation snap]
+	↓
+[OS Cursor]
+	↓
+[PyQt5 HUD overlay — gaze ring + dwell]
+```
+
+---
+
+## Calibration
+
+1. System launches automatically with calibration overlay
+2. Look at each dot on screen for 2 seconds
+3. After calibration, gaze control activates immediately
+4. Dwell (hold gaze) on any element for 1.5 seconds to click
+
+---
+
+## License
+
+Academic project — SHA University, 2026.
+
+---

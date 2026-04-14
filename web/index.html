@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>Gaze Mouse System</title>
+
+    <!--
+        This page runs HIDDEN inside headless Chromium on a virtual display.
+        It has no meaningful visual UI — it is purely an execution container
+        for WebGazer.js and the Socket.IO gaze bridge.
+
+        Calibration happens via the native GTK overlay (calibration.py).
+        The status div below is only visible if you point a real browser here.
+    -->
+
+    <script src="https://cdn.jsdelivr.net/npm/webgazer@2.1.0/dist/webgazer.js"></script>
+    <script src="https://cdn.socket.io/4.5.4/socket.io.min.js"></script>
+
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+
+        body {
+            background: #0a0a0a;
+            color: #ccc;
+            font-family: monospace;
+            font-size: 13px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        #status-wrap {
+            text-align: center;
+            opacity: 0.5;
+        }
+
+        #status-wrap h2 {
+            font-size: 14px;
+            font-weight: normal;
+            margin-bottom: 8px;
+            color: #888;
+        }
+
+        #status {
+            font-size: 13px;
+            color: #5df;
+        }
+
+        /* ── Dwell Ring ── */
+        .dwell-ring {
+            position: fixed;
+            width: 60px;
+            height: 60px;
+            border: 3px solid rgba(255, 255, 255, 0.8);
+            border-radius: 50%;
+            pointer-events: none;
+            display: none;
+            z-index: 9999;
+            transform: translate(-50%, -50%) scale(1);
+            transition: transform 0.1s linear, opacity 0.2s;
+        }
+
+        .dwell-ring.active {
+            display: block;
+        }
+    </style>
+</head>
+<body>
+    <div id="dwell-ring" class="dwell-ring"></div>
+
+    <!--
+        This element is visible only when testing with a real browser.
+        In production this page is running on a 1x1 virtual display — nobody
+        sees it. WebGazer and Socket.IO are fully functional regardless.
+    -->
+    <div id="status-wrap">
+        <h2>Gaze Mouse System — background tracker</h2>
+        <span id="status">Initialising ...</span>
+    </div>
+
+    <script src="app.js"></script>
+</body>
+</html>
