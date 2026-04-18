@@ -26,6 +26,7 @@ import sys
 import os
 import time
 import signal
+import shutil
 
 from screeninfo import get_monitors
 
@@ -36,6 +37,11 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ROOT_DIR = os.path.abspath(os.path.join(BASE_DIR, '..'))
 CORE_DIR = os.path.join(ROOT_DIR, 'core')
 APP_URL  = f'http://localhost:{HTTP_PORT}/web/index.html'
+AUTO_RESTART_BROWSER = False
+
+# Set True to show the browser window for camera debugging.
+BROWSER_VISIBLE = False
+BROWSER_VISIBLE_POSITION = (100, 100)
 
 # Windows subprocess creation flags
 CREATE_NEW_PROCESS_GROUP = 0x00000200
@@ -108,16 +114,22 @@ def start_browser_offscreen(browser_path, width, height):
 
     Now using a dedicated user-data-dir to ensure the offscreen position is respected.
     """
-    user_data_dir = os.path.join(ROOT_DIR, 'chrome_profile')
-    if not os.path.exists(user_data_dir):
-        os.makedirs(user_data_dir)
+    runtime_profiles_root = os.path.join(ROOT_DIR, 'chrome_profile_runtime')
+    os.makedirs(runtime_profiles_root, exist_ok=True)
+    user_data_dir = os.path.join(runtime_profiles_root, f'run_{int(time.time() * 1000)}')
+    os.makedirs(user_data_dir, exist_ok=True)
+
+    if BROWSER_VISIBLE:
+        window_position = f'--window-position={BROWSER_VISIBLE_POSITION[0]},{BROWSER_VISIBLE_POSITION[1]}'
+    else:
+        window_position = '--window-position=-32000,-32000'
 
     args = [
         browser_path,
         f'--app={APP_URL}',
         f'--user-data-dir={user_data_dir}',    # Force isolated, hidden process
         f'--window-size={width},{height}',
-        '--window-position=-32000,-32000',   # Place window offscreen (invisible)
+        window_position,
         '--no-first-run',
         '--disable-infobars',
         '--disable-session-crashed-bubble',
@@ -146,13 +158,17 @@ def start_browser_offscreen(browser_path, width, height):
     # Safety guard: disabling GPU overrides ANGLE and breaks WebGL tracking.
     args = [arg for arg in args if arg != '--disable-gpu']
 
-    print(f"[launcher] Launching browser offscreen at (-32000, -32000) ...")
-    return subprocess.Popen(
+    if BROWSER_VISIBLE:
+        print(f"[launcher] Launching browser visible at {BROWSER_VISIBLE_POSITION} ...")
+    else:
+        print("[launcher] Launching browser offscreen at (-32000, -32000) ...")
+    proc = subprocess.Popen(
         args,
         creationflags=CREATE_NEW_PROCESS_GROUP | CREATE_NO_WINDOW,
         stdout=open(os.path.join(ROOT_DIR, 'chrome.log'), 'wb'),
         stderr=subprocess.STDOUT,
     )
+    return proc, user_data_dir
 
 
 def start_hud():
@@ -194,6 +210,14 @@ def kill_proc(proc):
             pass
 
 
+def cleanup_profile_dir(path):
+    if path and os.path.isdir(path):
+        try:
+            shutil.rmtree(path, ignore_errors=True)
+        except Exception:
+            pass
+
+
 # ── Entry point ──────────────────────────────────────────────────────────────────
 
 if __name__ == '__main__':
@@ -214,6 +238,8 @@ if __name__ == '__main__':
     print(f"[launcher] Screen resolution: {sw}x{sh}")
 
     procs = []
+    browser_profile_dir = None
+    browser_proc = None
     try:
         backend   = start_backend()
         procs.append(backend)
@@ -221,7 +247,7 @@ if __name__ == '__main__':
         http_proc = start_http_server()
         procs.append(http_proc)
 
-        browser_proc = start_browser_offscreen(browser, sw, sh)
+        browser_proc, browser_profile_dir = start_browser_offscreen(browser, sw, sh)
         procs.append(browser_proc)
 
         hud = start_hud()
@@ -236,7 +262,10 @@ if __name__ == '__main__':
         print()
         print("=" * 60)
         print("  Gaze Mouse System (Windows 11) is running!")
-        print(f"  Browser  : hidden offscreen (-32000, -32000)")
+        if BROWSER_VISIBLE:
+            print(f"  Browser  : visible at {BROWSER_VISIBLE_POSITION}")
+        else:
+            print("  Browser  : hidden offscreen (-32000, -32000)")
         print(f"  Camera   : real webcam — full WebGazer accuracy")
         print(f"  Calibrate: PyQt5 fullscreen overlay")
         print(f"  HUD      : active (gaze ring + dwell visible)")
@@ -249,7 +278,41 @@ if __name__ == '__main__':
         print("[launcher] Calibration complete — gaze control is now active.")
         print("[launcher] Press Ctrl+C to stop.\n")
 
-        browser_proc.wait()
+        restart_window_start = time.time()
+        restart_count = 0
+        browser_exit_reported = False
+
+        while True:
+            time.sleep(1.0)
+            if browser_proc is not None and browser_proc.poll() is not None:
+                if not AUTO_RESTART_BROWSER:
+                    if not browser_exit_reported:
+                        print("[launcher] Browser process exited. Auto-restart is disabled to avoid disruption.")
+                        print("[launcher] Keep this running and relaunch browser manually when convenient.")
+                        browser_exit_reported = True
+                    browser_proc = None
+                    continue
+
+                now = time.time()
+                if now - restart_window_start > 30.0:
+                    restart_window_start = now
+                    restart_count = 0
+                restart_count += 1
+
+                if restart_count > 5:
+                    cooldown_s = 15
+                    print(f"[launcher] Browser restarted too often — pausing {cooldown_s}s to avoid loop.")
+                    time.sleep(cooldown_s)
+                    restart_window_start = time.time()
+                    restart_count = 0
+
+                print("[launcher] Browser process exited unexpectedly — restarting browser ...")
+                cleanup_profile_dir(browser_profile_dir)
+                browser_proc, browser_profile_dir = start_browser_offscreen(browser, sw, sh)
+                procs.append(browser_proc)
+                browser_exit_reported = False
+                print("[launcher] Browser restarted. Waiting for WebGazer to reinitialize (4s) ...")
+                time.sleep(4.0)
 
     except KeyboardInterrupt:
         print("\n[launcher] Shutting down ...")
@@ -257,4 +320,5 @@ if __name__ == '__main__':
     finally:
         for p in procs:
             kill_proc(p)
+        cleanup_profile_dir(browser_profile_dir)
         print("[launcher] All services stopped.")

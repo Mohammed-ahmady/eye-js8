@@ -19,29 +19,51 @@
 // Linux: --use-angle=gl | Windows: --use-angle=d3d11
 const CONFIG = {
     SERVER_URL: 'http://localhost:5000',
-    SMOOTHING: 0.03,   // Ultra-heavy damping
+    RAW_DIRECT_MODE: false,
+    ENABLE_IMPLICIT_LEARNING: false,
+    PERSIST_MODEL_ACROSS_SESSIONS: false,
+    SHOW_WEBGAZER_DEBUG_OVERLAY: false,
+
+    SMOOTHING: 0.03,
     DWELL_TIME: 1300,       
     DWELL_RADIUS: 50,       
     DWELL_SOFT_ABORT_MS: 300,
-    EMIT_INTERVAL: 33,     
+    EMIT_INTERVAL: 16,
     
-    // --- Ultra-Stability Precision Smoothing ---
-    ALPHA_STILL: 0.02,      // MAXIMUM STABILITY — prevents all jitter
-    ALPHA_MOVE:  0.12,      // BALANCED SLOW MOVEMENT
-    MOVE_THRESHOLD: 60,     
-    STABILITY_DEADZONE: 10, // px — cursor is frozen unless glance > 10px
-    EDGE_BOOST: 0.0,        // NO edge attraction
+    // Raw mode bypasses these filters, but keep defaults for easy fallback.
+    ALPHA_STILL: 0.015,
+    ALPHA_MOVE:  0.08,
+    MOVE_THRESHOLD: 80,
+    STABILITY_DEADZONE: 18,
+    EDGE_BOOST: 0.0,
+
+    CALIBRATION_STABILITY_WINDOW_MS: 220,
+    CALIBRATION_STABILITY_PX: 22,
+    CALIBRATION_MAX_WAIT_MS: 700,
+    CALIBRATION_SAMPLES_PER_POINT: 2,
+    CALIBRATION_SAMPLE_GAP_MS: 80,
     
     CLICK_COOLDOWN: 1000,   // ms before another dwell-click is allowed
     
     RADIAL_MENU_DWELL: 800,        // ms to select a radial menu slice
-    RADIAL_MENU_CANCEL_DIST: 250,  // px distance to auto-cancel menu
+    RADIAL_MENU_DEADZONE: 52,
+    WEBGAZER_RETRY_MS: 2500,
+
+    BAR_MENU_OPEN_MS: 700,
+    BAR_MENU_SELECT_MS: 3000,
+    BAR_MENU_POST_FREEZE_MS: 600,
+    BAR_MENU_PAGE_SIZE: 10,
+    BAR_MENU_STALE_MS: 2200,
+    BAR_MENU_MAX_ITEMS: 40,
+    BAR_MENU_DEADZONE: 60,
+    BAR_MENU_ANGLE_SMOOTHING: 0.35,
 
 };
 
 // ── State ──────────────────────────────────────────────────────────────────────
 const state = {
     isReady: false,   // true once calibration_done received
+    actionsEnabled: false,
     smoothed: { x: 0, y: 0 },
     dwellStart: null,
     dwellAnchor: { x: 0, y: 0 },
@@ -54,9 +76,337 @@ const state = {
     calibSamplesLeft: 0,       // samples still expected from GTK
     poseOffsetX: 0,            // head pose correction offset (set by FIX-7)
     poseOffsetY: 0,
+    webgazerStarted: false,
+    webgazerStarting: false,
+    pendingCalibrationDone: false,
+    pendingValidationDone: false,
+    webgazerRetryTimer: null,
+    webgazerRetryCount: 0,
     
-    radialMenu: { active: false, x: 0, y: 0, hoverSlice: null, dwellStart: null },
+    radialMenu: { active: false, x: 0, y: 0, hoverSlice: null, dwellStart: null, targetX: 0, targetY: 0, openedAt: 0 },
+    barContext: { active: false, barType: '', barLabel: '', items: [], pageSize: CONFIG.BAR_MENU_PAGE_SIZE, ts: 0 },
+    barMenu: { active: false, x: 0, y: 0, hoverSlice: null, dwellStart: null, openedAt: 0, items: [], page: 0, pages: 1, barLabel: '', barType: '', hoverStart: null, freezeUntil: 0, angle: null },
+    gazeHistory: [],
 };
+
+const RADIAL_MENU_ACTIONS = ['Scroll', 'Cancel', 'Right', 'Double', 'Left'];
+
+
+function getScreenTransform() {
+    const dpr = window.devicePixelRatio || 1;
+    const rawX = typeof window.screenX === 'number' ? window.screenX : (window.screenLeft || 0);
+    const rawY = typeof window.screenY === 'number' ? window.screenY : (window.screenTop || 0);
+    // Ignore offscreen placement (e.g., -32000, -32000) so coords stay stable.
+    const useOffset = rawX > -1000 && rawY > -1000;
+    return {
+        dpr,
+        offsetX: useOffset ? rawX : 0,
+        offsetY: useOffset ? rawY : 0,
+    };
+}
+
+
+function isGazeStableWindow() {
+    const samples = state.gazeHistory;
+    if (samples.length < 3) return false;
+    let sumX = 0;
+    let sumY = 0;
+    for (const s of samples) {
+        sumX += s.x;
+        sumY += s.y;
+    }
+    const meanX = sumX / samples.length;
+    const meanY = sumY / samples.length;
+    let maxDist = 0;
+    for (const s of samples) {
+        const dx = s.x - meanX;
+        const dy = s.y - meanY;
+        const d = Math.sqrt((dx * dx) + (dy * dy));
+        if (d > maxDist) maxDist = d;
+    }
+    return maxDist <= CONFIG.CALIBRATION_STABILITY_PX;
+}
+
+
+function recordCalibrationSamples(cx, cy) {
+    const count = Math.max(1, CONFIG.CALIBRATION_SAMPLES_PER_POINT || 1);
+    const gapMs = Math.max(0, CONFIG.CALIBRATION_SAMPLE_GAP_MS || 0);
+    for (let i = 0; i < count; i += 1) {
+        setTimeout(() => {
+            try {
+                webgazer.recordScreenPosition(cx, cy, 'click');
+            } catch (err) {
+                if (shouldIgnoreWebGazerDomError(err)) {
+                    debugLog('calibration_point_ignored_dom_error', {
+                        x: Math.round(cx),
+                        y: Math.round(cy),
+                        message: String(err && err.message ? err.message : err),
+                    });
+                    return;
+                }
+                debugLog('calibration_point_error', {
+                    x: Math.round(cx),
+                    y: Math.round(cy),
+                    message: String(err && err.message ? err.message : err),
+                });
+            }
+        }, i * gapMs);
+    }
+}
+
+
+function scheduleCalibrationSample(x, y) {
+    const { dpr, offsetX, offsetY } = getScreenTransform();
+    const cx = (x - offsetX) / dpr;
+    const cy = (y - offsetY) / dpr;
+    const start = Date.now();
+
+    const attempt = () => {
+        const waitedMs = Date.now() - start;
+        if (isBlinking()) {
+            if (waitedMs >= CONFIG.CALIBRATION_MAX_WAIT_MS) {
+                recordCalibrationSamples(cx, cy);
+                return;
+            }
+            setTimeout(attempt, 40);
+            return;
+        }
+
+        if (isGazeStableWindow() || waitedMs >= CONFIG.CALIBRATION_MAX_WAIT_MS) {
+            recordCalibrationSamples(cx, cy);
+            return;
+        }
+
+        setTimeout(attempt, 40);
+    };
+
+    attempt();
+}
+
+
+function setActionsEnabled(enabled) {
+    state.actionsEnabled = !!enabled;
+    if (!state.actionsEnabled) {
+        if (state.radialMenu.active) {
+            closeRadialMenu('disabled');
+        }
+        if (state.barMenu.active) {
+            closeBarMenu('disabled');
+        }
+    }
+    if (state.socket && state.socket.connected) {
+        state.socket.emit('actions_state', { enabled: state.actionsEnabled });
+    }
+}
+
+function activateGazeControl() {
+    console.log('[calib] calibration complete — gaze preview active');
+    state.isReady = true;
+    setActionsEnabled(false);
+    debugLog('calibration_done');
+    updateStatus('Validation running — gaze preview');
+
+    // Save only when persistence mode is explicitly enabled.
+    if (CONFIG.PERSIST_MODEL_ACROSS_SESSIONS && webgazer.saveDataAcrossSessions) {
+        webgazer.saveDataAcrossSessions(true);
+        console.log('[model] calibration saved to IndexedDB for next session');
+    }
+
+    // Request Wake Lock to prevent the hidden page from being throttled
+    if ('wakeLock' in navigator) {
+        navigator.wakeLock.request('screen').then(() => {
+            console.log('[wakeLock] acquired');
+        }).catch(err => {
+            console.warn('[wakeLock] not available:', err.message);
+        });
+    }
+}
+
+function enableGazeActions() {
+    if (!state.isReady) return;
+    setActionsEnabled(true);
+    debugLog('validation_done');
+    updateStatus('Gaze control active');
+}
+
+
+function shouldIgnoreWebGazerDomError(err) {
+    const msg = String((err && err.message) || err || '');
+    const m = msg.toLowerCase();
+    if (!m.includes('removechild')) return false;
+    return (
+        m.includes('notfounderror') ||
+        m.includes('failed to execute') ||
+        m.includes('parameter 1 is not of type')
+    );
+}
+
+
+async function probeCameraAccess() {
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        return { ok: false, reason: 'getUserMedia_unavailable' };
+    }
+
+    const constraintsPrimary = {
+        video: {
+            facingMode: 'user',
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+        },
+        audio: false,
+    };
+
+    const constraintsFallback = { video: true, audio: false };
+
+    const tryProbe = async (constraints, tag) => {
+        const stream = await navigator.mediaDevices.getUserMedia(constraints);
+        stream.getTracks().forEach((t) => t.stop());
+        return { ok: true, tag };
+    };
+
+    try {
+        return await tryProbe(constraintsPrimary, 'primary');
+    } catch (e1) {
+        try {
+            return await tryProbe(constraintsFallback, 'fallback');
+        } catch (e2) {
+            const err = e2 || e1;
+            return {
+                ok: false,
+                reason: (err && err.message) ? err.message : String(err),
+            };
+        }
+    }
+}
+
+
+function hardResetWebGazerCameraState() {
+    try {
+        if (webgazer.end) {
+            webgazer.end();
+        }
+    } catch (_) {
+        // Ignore reset failures; retries will still proceed.
+    }
+
+    try {
+        const video = document.getElementById('webgazerVideoFeed');
+        if (video && video.srcObject && video.srcObject.getTracks) {
+            video.srcObject.getTracks().forEach((t) => t.stop());
+            video.srcObject = null;
+        }
+    } catch (_) {
+        // Best-effort cleanup only.
+    }
+}
+
+
+function scheduleWebGazerRetry(reason) {
+    if (state.webgazerStarted || state.webgazerStarting || state.webgazerRetryTimer) {
+        return;
+    }
+
+    state.webgazerRetryCount += 1;
+    const delayMs = CONFIG.WEBGAZER_RETRY_MS;
+    console.warn(`[webgazer] retrying in ${delayMs}ms (attempt ${state.webgazerRetryCount}) — reason: ${reason}`);
+    debugLog('webgazer_retry_scheduled', {
+        attempt: state.webgazerRetryCount,
+        delayMs,
+        reason: String(reason || 'unknown'),
+    });
+    updateStatus(`Camera unavailable — retrying (${state.webgazerRetryCount}) ...`);
+
+    state.webgazerRetryTimer = setTimeout(() => {
+        state.webgazerRetryTimer = null;
+        startWebGazerRuntime();
+    }, delayMs);
+}
+
+
+async function startWebGazerRuntime() {
+    if (state.webgazerStarted || state.webgazerStarting) {
+        return;
+    }
+
+    state.webgazerStarting = true;
+
+    // Force explicit camera constraints so WebGazer does not reuse stale settings.
+    webgazer.params.camConstraints = {
+        video: {
+            facingMode: 'user',
+            width: { ideal: 640 },
+            height: { ideal: 480 },
+        },
+        audio: false,
+    };
+
+    const probe = await probeCameraAccess();
+    if (!probe.ok) {
+        state.webgazerStarting = false;
+        state.webgazerStarted = false;
+        hardResetWebGazerCameraState();
+        debugLog('webgazer_camera_probe_failed', { reason: probe.reason || 'unknown' });
+        scheduleWebGazerRetry(probe.reason || 'camera_probe_failed');
+        return;
+    }
+
+    debugLog('webgazer_camera_probe_ok', { mode: probe.tag || 'unknown' });
+
+    webgazer
+        .setGazeListener((data) => {
+            if (!data) return;
+            onGaze(data.x, data.y);
+        })
+        .showVideoPreview(CONFIG.SHOW_WEBGAZER_DEBUG_OVERLAY)
+        .showPredictionPoints(CONFIG.SHOW_WEBGAZER_DEBUG_OVERLAY)
+        .applyKalmanFilter(!CONFIG.RAW_DIRECT_MODE)
+        .begin()
+        .then(() => {
+            state.webgazerStarting = false;
+            state.webgazerStarted = true;
+            state.webgazerRetryCount = 0;
+            console.log('[webgazer] started — notifying server');
+            debugLog('webgazer_started', {
+                kalman: !CONFIG.RAW_DIRECT_MODE,
+                rawMode: CONFIG.RAW_DIRECT_MODE,
+            });
+            updateStatus('WebGazer ready — awaiting calibration ...');
+            state.socket.emit('webgazer_ready', {});
+
+            if (state.pendingCalibrationDone) {
+                state.pendingCalibrationDone = false;
+                activateGazeControl();
+            }
+            if (state.pendingValidationDone) {
+                state.pendingValidationDone = false;
+                enableGazeActions();
+            }
+        })
+        .catch(err => {
+            state.webgazerStarting = false;
+            state.webgazerStarted = false;
+            const message = (err && err.message) ? err.message : String(err);
+            hardResetWebGazerCameraState();
+            console.error('[webgazer] FAILED:', err);
+            debugLog('webgazer_start_failed', { message });
+            scheduleWebGazerRetry(message);
+        });
+}
+
+
+function debugLog(event, details = {}) {
+    try {
+        if (!state.socket || !state.socket.connected) return;
+        state.socket.emit('debug_log', {
+            source: 'web_app',
+            event,
+            details,
+            timestamp: Date.now(),
+        });
+    } catch (e) {
+        // Never fail gaze runtime because debug telemetry failed.
+    }
+}
 
 
 // ── Socket.IO ──────────────────────────────────────────────────────────────────
@@ -66,45 +416,64 @@ function initSocket() {
     state.socket.on('connect', () => {
         console.log('[socket] connected — registering as browser');
         state.socket.emit('register', { type: 'browser' });
+        debugLog('socket_connect', { rawMode: CONFIG.RAW_DIRECT_MODE });
         updateStatus('Waiting for native calibration ...');
+        state.socket.emit('actions_state', { enabled: state.actionsEnabled });
     });
 
     state.socket.on('disconnect', () => {
         console.warn('[socket] disconnected');
+        debugLog('socket_disconnect');
         updateStatus('Server disconnected');
     });
 
     // ── Calibration relay from server ─────────────────────────────────────────
     state.socket.on('native_calibration_point', (data) => {
         const { x, y } = data;
+
+        // Any new calibration point means we are in an active calibration phase.
+        if (state.isReady || state.radialMenu.active || state.barMenu.active) {
+            state.isReady = false;
+            setActionsEnabled(false);
+            state.dwellStart = null;
+            state.dwellExitTime = null;
+            updateDwellRing(null, null, 0);
+            if (state.radialMenu.active) {
+                state.radialMenu.active = false;
+                state.socket.emit('radial_menu_state', { active: false, menu_type: 'default' });
+            }
+            if (state.barMenu.active) {
+                closeBarMenu('calibration');
+            }
+        }
+
         // Guard against blink frames corrupting calibration data
         if (isBlinking()) {
             console.log(`[calib] blink detected — skipping sample at (${x}, ${y})`);
             return;
         }
-        webgazer.recordScreenPosition(x, y, 'click');
+        scheduleCalibrationSample(x, y);
+        debugLog('calibration_point', { x: Math.round(x), y: Math.round(y) });
         updateStatus(`Calibrating ... (${x}, ${y})`);
     });
 
     state.socket.on('native_calibration_done', () => {
-        console.log('[calib] calibration complete — gaze streaming active');
-        state.isReady = true;
-        updateStatus('Gaze control active');
-
-        // Explicitly save the freshly calibrated model to IndexedDB
-        if (webgazer.saveDataAcrossSessions) {
-            webgazer.saveDataAcrossSessions(true);
-            console.log('[model] calibration saved to IndexedDB for next session');
+        if (!state.webgazerStarted) {
+            state.pendingCalibrationDone = true;
+            debugLog('calibration_done_deferred', { reason: 'webgazer_not_started' });
+            return;
         }
 
-        // Request Wake Lock to prevent the hidden page from being throttled
-        if ('wakeLock' in navigator) {
-            navigator.wakeLock.request('screen').then(() => {
-                console.log('[wakeLock] acquired');
-            }).catch(err => {
-                console.warn('[wakeLock] not available:', err.message);
-            });
+        activateGazeControl();
+    });
+
+    state.socket.on('native_validation_done', () => {
+        if (!state.webgazerStarted) {
+            state.pendingValidationDone = true;
+            debugLog('validation_done_deferred', { reason: 'webgazer_not_started' });
+            return;
         }
+        enableGazeActions();
     });
 
     // ── Snap / release feedback ───────────────────────────────────────────────
@@ -122,12 +491,33 @@ function initSocket() {
     // server.py computes how far the user's head has moved since calibration
     // and sends XY correction deltas. We accumulate them into state.poseOffset.
     state.socket.on('pose_correction', (data) => {
+        if (CONFIG.RAW_DIRECT_MODE) return;
         state.poseOffsetX = data.dx || 0;
         state.poseOffsetY = data.dy || 0;
     });
 
+    state.socket.on('bar_context', (data) => {
+        if (!data || typeof data !== 'object') return;
+        const items = Array.isArray(data.items) ? data.items : [];
+        state.barContext.active = !!data.active;
+        state.barContext.barType = data.bar_type || '';
+        state.barContext.barLabel = data.bar_label || '';
+        state.barContext.pageSize = data.page_size || CONFIG.BAR_MENU_PAGE_SIZE;
+        state.barContext.items = items.slice(0, CONFIG.BAR_MENU_MAX_ITEMS);
+        state.barContext.ts = Date.now();
+
+        if (!state.barContext.active && state.barMenu.active) {
+            closeBarMenu('context_lost');
+        }
+
+        if (state.barMenu.active) {
+            syncBarMenuItems();
+        }
+    });
+
     // --- Implicit Calibration (Self-Learning) ---
     state.socket.on('click_learned', (data) => {
+        if (!CONFIG.ENABLE_IMPLICIT_LEARNING) return;
         if (isBlinking()) {
             console.log('[learning] skipped — blink detected, protecting model');
             return;
@@ -146,10 +536,15 @@ function initWebGazer() {
     webgazer.params.blazefaceModelURL = 'http://localhost:8000/models/blazeface/model.json';
     webgazer.params.facemeshModelURL = 'http://localhost:8000/models/facemesh/model.json';
 
-    // Enable IndexedDB model persistence — model survives page reloads and restarts.
-    // WebGazer will automatically load the saved regression weights on next session.
-    webgazer.saveDataAcrossSessions(true);
-    console.log('[model] IndexedDB persistence enabled');
+    if (webgazer.saveDataAcrossSessions) {
+        webgazer.saveDataAcrossSessions(CONFIG.PERSIST_MODEL_ACROSS_SESSIONS);
+    }
+
+    if (CONFIG.RAW_DIRECT_MODE && webgazer.clearData) {
+        webgazer.clearData();
+        console.log('[model] cleared persisted calibration for clean raw session');
+            debugLog('model_cleared_for_raw_mode');
+    }
     
     // --- WebGazer Tuning ---
     webgazer.params.imgWidth = 240;  // Default is 128. Increase for higher fidelity.
@@ -168,27 +563,9 @@ function initWebGazer() {
     }
     console.log('[webgl] OK —', gl.getParameter(gl.RENDERER));
 
-    webgazer
-        .setGazeListener((data) => {
-            if (!data) return;
-            onGaze(data.x, data.y);
-        })
-        .showVideoPreview(false)
-        .showPredictionPoints(false)
-        .applyKalmanFilter(true)
-        .begin()
-        .then(() => {
-            console.log('[webgazer] started — notifying server');
-            updateStatus('WebGazer ready — awaiting calibration ...');
-            state.socket.emit('webgazer_ready', {});
-        })
-        .catch(err => {
-            console.error('[webgazer] FAILED:', err);
-            updateStatus('ERROR: ' + err.message);
-        });
-
     console.log('[webgazer] initialising ...');
     updateStatus('WebGazer initialising ...');
+    startWebGazerRuntime();
 }
 
 
@@ -221,53 +598,84 @@ function applyCenterBiasCorrection(x, y) {
 
 // ── Gaze handler ───────────────────────────────────────────────────────────────
 function onGaze(rawX, rawY) {
-    if (!state.isReady || state.isPaused) return;
     if (!isFinite(rawX) || !isFinite(rawY)) return;
 
-    // --- Stability Deadzone ---
-    const sdx = rawX - state.smoothed.x;
-    const sdy = rawY - state.smoothed.y;
-    const dist = Math.sqrt(sdx*sdx + sdy*sdy);
-    if (dist < CONFIG.STABILITY_DEADZONE) {
+    if (state.barMenu.active) {
+        handleBarMenuGaze(rawX, rawY);
         return;
     }
 
-    // --- Dynamic Smoothing (Adaptive EMA) ---
-    // If we jumped far, we prioritze speed over stability (less lag)
-    // If we are mostly still, we prioritize stability (less jitter)
-    let a = CONFIG.ALPHA_STILL;
-    if (dist > CONFIG.MOVE_THRESHOLD) {
-        a = CONFIG.ALPHA_MOVE;
+    const now = Date.now();
+    state.gazeHistory.push({ x: rawX, y: rawY, ts: now });
+    const cutoff = now - CONFIG.CALIBRATION_STABILITY_WINDOW_MS;
+    while (state.gazeHistory.length && state.gazeHistory[0].ts < cutoff) {
+        state.gazeHistory.shift();
     }
 
-    state.smoothed.x = a * rawX + (1 - a) * state.smoothed.x;
-    state.smoothed.y = a * rawY + (1 - a) * state.smoothed.y;
+    if (!state.isReady || state.isPaused) return;
 
-    // Apply head pose correction, then center-bias correction
-    const poseX = state.smoothed.x - (state.poseOffsetX || 0);
-    const poseY = state.smoothed.y - (state.poseOffsetY || 0);
-    const corrected = applyCenterBiasCorrection(poseX, poseY);
-    const { x, y } = corrected;
-    const W = window.innerWidth;
-    const H = window.innerHeight;
+    if (isBarMenuFrozen()) {
+        return;
+    }
 
-    if (state.radialMenu.active) {
-        handleRadialMenuGaze(x, y);
-    } else {
-        handleDwell(x, y);
+    let x = rawX;
+    let y = rawY;
+
+    if (!CONFIG.RAW_DIRECT_MODE) {
+        // --- Stability Deadzone ---
+        const sdx = rawX - state.smoothed.x;
+        const sdy = rawY - state.smoothed.y;
+        const dist = Math.sqrt(sdx * sdx + sdy * sdy);
+        if (dist < CONFIG.STABILITY_DEADZONE) {
+            return;
+        }
+
+        // --- Dynamic Smoothing (Adaptive EMA) ---
+        let a = CONFIG.ALPHA_STILL;
+        if (dist > CONFIG.MOVE_THRESHOLD) {
+            a = CONFIG.ALPHA_MOVE;
+        }
+
+        state.smoothed.x = a * rawX + (1 - a) * state.smoothed.x;
+        state.smoothed.y = a * rawY + (1 - a) * state.smoothed.y;
+
+        // Apply head pose correction, then center-bias correction.
+        const poseX = state.smoothed.x - (state.poseOffsetX || 0);
+        const poseY = state.smoothed.y - (state.poseOffsetY || 0);
+        const corrected = applyCenterBiasCorrection(poseX, poseY);
+        x = corrected.x;
+        y = corrected.y;
+    }
+
+    state.smoothed.x = x;
+    state.smoothed.y = y;
+
+    if (state.actionsEnabled) {
+        if (state.radialMenu.active) {
+            handleRadialMenuGaze(x, y);
+        } else if (isBarContextActive()) {
+            handleBarHover(x, y);
+        } else {
+            handleDwell(x, y);
+        }
     }
 
     // Throttle emissions to ~30 fps
-    const now = Date.now();
-    if (now - state.lastEmitTime >= CONFIG.EMIT_INTERVAL) {
+    const emitNow = Date.now();
+    if (!state.barMenu.active && !isBarMenuFrozen() && emitNow - state.lastEmitTime >= CONFIG.EMIT_INTERVAL) {
+        // Convert CSS pixels to physical pixels before sending to the server.
+        const { dpr, offsetX, offsetY } = getScreenTransform();
+        const outX = (x * dpr) + offsetX;
+        const outY = (y * dpr) + offsetY;
         state.socket.emit('move_mouse', {
-            x, y,
+            x: outX,
+            y: outY,
             screen_left: window.screenX || 0,
             screen_top: window.screenY || 0,
             device_pixel_ratio: window.devicePixelRatio || 1,
-            timestamp: now,
+            timestamp: emitNow,
         });
-        state.lastEmitTime = now;
+        state.lastEmitTime = emitNow;
     }
 }
 
@@ -377,41 +785,63 @@ function updateDwellRing(x, y, progress) {
 // ── Radial Menu Logic ─────────────────────────────────────────────────────────
 
 function openRadialMenu(x, y) {
+    const cx = window.innerWidth / 2;
+    const cy = window.innerHeight / 2;
     state.radialMenu.active = true;
-    state.radialMenu.x = x;
-    state.radialMenu.y = y;
+    state.radialMenu.x = cx;
+    state.radialMenu.y = cy;
+    state.radialMenu.targetX = x;
+    state.radialMenu.targetY = y;
     state.radialMenu.hoverSlice = null;
     state.radialMenu.dwellStart = null;
+    state.radialMenu.openedAt = Date.now();
     
-    state.socket.emit('radial_menu_state', { active: true, x, y, slice: null, progress: 0 });
-    console.log('[radial] menu opened at', x, y);
+    state.socket.emit('radial_menu_state', {
+        active: true,
+        x: cx,
+        y: cy,
+        slice: null,
+        progress: 0,
+        target_x: x,
+        target_y: y,
+        menu_type: 'default',
+    });
+    console.log('[radial] menu opened at', cx, cy, 'target', x, y);
+    debugLog('radial_opened', { x: Math.round(cx), y: Math.round(cy), target_x: Math.round(x), target_y: Math.round(y) });
     updateDwellRing(null, null, 0);
 }
 
 function closeRadialMenu(triggerActionName = null) {
     state.radialMenu.active = false;
     state.radialMenu.hoverSlice = null;
-    state.socket.emit('radial_menu_state', { active: false });
+    state.radialMenu.openedAt = 0;
+    state.socket.emit('radial_menu_state', { active: false, menu_type: 'default' });
     
     // Reset regular dwell to prevent immediate re-triggering
     state.dwellStart = null;
     state.dwellAnchor = { x: state.smoothed.x, y: state.smoothed.y };
     state.lastClickTime = Date.now();
     
-    if (triggerActionName && triggerActionName !== 'Cancel') {
-        let type = 'left';
-        if (triggerActionName === 'Right') type = 'right';
-        if (triggerActionName === 'Double') type = 'double';
-        
-        if (triggerActionName === 'Scroll') {
-            state.socket.emit('trigger_scroll', { x: state.radialMenu.x, y: state.radialMenu.y, direction: 'down', amount: 3 });
-            console.log('[radial] scroll triggered');
-        } else {
-            state.socket.emit('trigger_action', { x: state.radialMenu.x, y: state.radialMenu.y, type: type });
-            console.log(`[radial] ${type} click triggered`);
-        }
-    } else {
+    if (!triggerActionName || triggerActionName === 'Cancel') {
         console.log('[radial] menu cancelled');
+        debugLog('radial_cancelled');
+    }
+}
+
+function fireRadialAction(actionName) {
+    if (!actionName || actionName === 'Cancel') return;
+    let type = 'left';
+    if (actionName === 'Right') type = 'right';
+    if (actionName === 'Double') type = 'double';
+
+    if (actionName === 'Scroll') {
+        state.socket.emit('trigger_scroll', { x: state.radialMenu.x, y: state.radialMenu.y, direction: 'down', amount: 3 });
+        console.log('[radial] scroll triggered');
+        debugLog('radial_action', { action: 'Scroll' });
+    } else {
+        state.socket.emit('trigger_action', { x: state.radialMenu.x, y: state.radialMenu.y, type: type });
+        console.log(`[radial] ${type} click triggered`);
+        debugLog('radial_action', { action: actionName, type: type });
     }
 }
 
@@ -421,25 +851,20 @@ function handleRadialMenuGaze(x, y) {
     const dy = y - rm.y;
     const dist = Math.sqrt(dx * dx + dy * dy);
 
-    // Auto cancel if look too far away
-    if (dist > CONFIG.RADIAL_MENU_CANCEL_DIST) {
-        closeRadialMenu('Cancel');
-        return;
-    }
-
     // Deadzone check
-    if (dist < 40) {
+    if (dist < CONFIG.RADIAL_MENU_DEADZONE) {
         updateRadialMenuHover(null);
         return;
     }
 
-    // Determine slice (0 to 4)
+    // Determine slice (0 to N-1)
     // angle from top (-pi/2) clockwise
     let angle = Math.atan2(dy, dx); // -pi to pi
     angle += Math.PI / 2;
     if (angle < 0) angle += 2 * Math.PI; // 0 to 2pi
     
-    const sliceAngle = (2 * Math.PI) / 5;
+    const sliceAngle = (2 * Math.PI) / RADIAL_MENU_ACTIONS.length;
+    angle = (angle + (sliceAngle / 2)) % (2 * Math.PI);
     const sliceIndex = Math.floor(angle / sliceAngle);
     
     updateRadialMenuHover(sliceIndex);
@@ -453,20 +878,286 @@ function updateRadialMenuHover(sliceIndex) {
         rm.hoverSlice = sliceIndex;
         rm.dwellStart = sliceIndex !== null ? now : null;
         state.socket.emit('radial_menu_state', {
-            active: true, x: rm.x, y: rm.y, slice: rm.hoverSlice, progress: 0
+            active: true,
+            x: rm.x,
+            y: rm.y,
+            slice: rm.hoverSlice,
+            progress: 0,
+            target_x: rm.targetX,
+            target_y: rm.targetY,
+            menu_type: 'default',
         });
     } else if (sliceIndex !== null) {
         const elapsed = now - rm.dwellStart;
         const progress = Math.min(elapsed / CONFIG.RADIAL_MENU_DWELL, 1.0);
         
         state.socket.emit('radial_menu_state', {
-            active: true, x: rm.x, y: rm.y, slice: rm.hoverSlice, progress: progress
+            active: true,
+            x: rm.x,
+            y: rm.y,
+            slice: rm.hoverSlice,
+            progress: progress,
+            target_x: rm.targetX,
+            target_y: rm.targetY,
+            menu_type: 'default',
         });
         
         if (progress >= 1.0) {
-            const actions = ['Double', 'Left', 'Scroll', 'Right', 'Cancel'];
-            closeRadialMenu(actions[sliceIndex]);
+            const action = RADIAL_MENU_ACTIONS[sliceIndex];
+            if (action === 'Cancel') {
+                closeRadialMenu('Cancel');
+                return;
+            }
+            fireRadialAction(action);
+            rm.hoverSlice = null;
+            rm.dwellStart = null;
+            state.socket.emit('radial_menu_state', {
+                active: true,
+                x: rm.x,
+                y: rm.y,
+                slice: null,
+                progress: 0,
+                target_x: rm.targetX,
+                target_y: rm.targetY,
+                menu_type: 'default',
+            });
         }
+    }
+}
+
+
+// ── Bar Menu Logic ───────────────────────────────────────────────────────────
+function isBarContextActive() {
+    if (!state.barContext.active) return false;
+    const age = Date.now() - (state.barContext.ts || 0);
+    return age >= 0 && age <= CONFIG.BAR_MENU_STALE_MS;
+}
+
+function isBarMenuFrozen() {
+    return Date.now() < (state.barMenu.freezeUntil || 0);
+}
+
+function normalizeAngle(angle) {
+    let a = angle;
+    while (a <= -Math.PI) a += Math.PI * 2;
+    while (a > Math.PI) a -= Math.PI * 2;
+    return a;
+}
+
+function smoothAngle(prev, next, factor) {
+    if (prev === null || prev === undefined) return next;
+    const delta = normalizeAngle(next - prev);
+    return prev + (delta * factor);
+}
+
+function syncBarMenuItems() {
+    const items = Array.isArray(state.barContext.items) ? state.barContext.items : [];
+    state.barMenu.items = items.slice(0, CONFIG.BAR_MENU_MAX_ITEMS);
+    state.barMenu.barLabel = state.barContext.barLabel || state.barMenu.barLabel;
+    state.barMenu.barType = state.barContext.barType || state.barMenu.barType;
+    const totalPages = Math.max(1, Math.ceil(state.barMenu.items.length / (state.barContext.pageSize || CONFIG.BAR_MENU_PAGE_SIZE)));
+    state.barMenu.pages = totalPages;
+    if (state.barMenu.page >= totalPages) {
+        state.barMenu.page = totalPages - 1;
+    }
+    if (state.barMenu.active) {
+        emitBarMenuState(state.barMenu.hoverSlice, 0);
+    }
+}
+
+function openBarMenu() {
+    if (!isBarContextActive()) return;
+    if (!state.barContext.items || !state.barContext.items.length) return;
+    const cx = window.innerWidth / 2;
+    const cy = window.innerHeight / 2;
+    state.barMenu.active = true;
+    state.barMenu.x = cx;
+    state.barMenu.y = cy;
+    state.barMenu.hoverSlice = null;
+    state.barMenu.dwellStart = null;
+    state.barMenu.openedAt = Date.now();
+    state.barMenu.page = 0;
+    state.barMenu.angle = null;
+    state.barMenu.freezeUntil = 0;
+    syncBarMenuItems();
+
+    if (state.radialMenu.active) {
+        state.radialMenu.active = false;
+        state.socket.emit('radial_menu_state', { active: false, menu_type: 'default' });
+    }
+
+    emitBarMenuState(null, 0);
+    updateDwellRing(null, null, 0);
+}
+
+function closeBarMenu(reason = null, freezeMs = 0) {
+    state.barMenu.active = false;
+    state.barMenu.hoverSlice = null;
+    state.barMenu.dwellStart = null;
+    state.barMenu.openedAt = 0;
+    state.barMenu.hoverStart = null;
+    state.barMenu.angle = null;
+    if (freezeMs > 0) {
+        state.barMenu.freezeUntil = Date.now() + freezeMs;
+    }
+    state.socket.emit('radial_menu_state', { active: false, menu_type: 'bar' });
+
+    // Reset regular dwell to prevent immediate re-triggering
+    state.dwellStart = null;
+    state.dwellAnchor = { x: state.smoothed.x, y: state.smoothed.y };
+    state.lastClickTime = Date.now();
+
+    if (!reason || reason === 'cancel') {
+        console.log('[bar] menu closed');
+        debugLog('bar_menu_closed', { reason: reason || 'cancel' });
+    }
+}
+
+function buildBarMenuEntries() {
+    const pageSize = state.barContext.pageSize || CONFIG.BAR_MENU_PAGE_SIZE;
+    const totalPages = Math.max(1, Math.ceil(state.barMenu.items.length / pageSize));
+    const page = Math.max(0, Math.min(state.barMenu.page, totalPages - 1));
+    const start = page * pageSize;
+    const sliceItems = state.barMenu.items.slice(start, start + pageSize);
+    const entries = sliceItems.map((item, idx) => ({
+        type: 'item',
+        id: item.id,
+        label: item.label || `Item ${start + idx + 1}`,
+    }));
+
+    if (totalPages > 1) {
+        entries.push({ type: 'action', action: 'prev', label: 'Prev' });
+        entries.push({ type: 'action', action: 'next', label: 'Next' });
+    }
+
+    entries.push({ type: 'action', action: 'cancel', label: 'Cancel' });
+    return { entries, totalPages, page };
+}
+
+function emitBarMenuState(sliceIndex, progress) {
+    if (!state.barMenu.active) return;
+    const { entries, totalPages, page } = buildBarMenuEntries();
+    const labels = entries.map((e) => e.label);
+    state.socket.emit('radial_menu_state', {
+        active: true,
+        x: state.barMenu.x,
+        y: state.barMenu.y,
+        slice: sliceIndex,
+        progress: progress || 0,
+        menu_type: 'bar',
+        items: labels,
+        title: state.barMenu.barLabel || state.barMenu.barType || 'Bar',
+        page: page + 1,
+        pages: totalPages,
+    });
+}
+
+function handleBarHover() {
+    if (!isBarContextActive()) {
+        state.barMenu.hoverStart = null;
+        return;
+    }
+
+    const now = Date.now();
+    if (!state.barMenu.hoverStart) {
+        state.barMenu.hoverStart = now;
+    }
+
+    const elapsed = now - state.barMenu.hoverStart;
+    if (elapsed >= CONFIG.BAR_MENU_OPEN_MS) {
+        state.barMenu.hoverStart = null;
+        openBarMenu();
+    }
+}
+
+function handleBarMenuGaze(rawX, rawY) {
+    if (!isBarContextActive()) {
+        closeBarMenu('stale');
+        return;
+    }
+    const bm = state.barMenu;
+    const dx = rawX - bm.x;
+    const dy = rawY - bm.y;
+    const dist = Math.sqrt(dx * dx + dy * dy);
+
+    if (dist < CONFIG.BAR_MENU_DEADZONE) {
+        updateBarMenuHover(null);
+        return;
+    }
+
+    const { entries } = buildBarMenuEntries();
+    if (!entries.length) {
+        updateBarMenuHover(null);
+        return;
+    }
+
+    let angle = Math.atan2(dy, dx);
+    angle = smoothAngle(bm.angle, angle, CONFIG.BAR_MENU_ANGLE_SMOOTHING);
+    bm.angle = angle;
+
+    angle += Math.PI / 2;
+    if (angle < 0) angle += 2 * Math.PI;
+
+    const sliceAngle = (2 * Math.PI) / entries.length;
+    angle = (angle + (sliceAngle / 2)) % (2 * Math.PI);
+    const sliceIndex = Math.floor(angle / sliceAngle);
+    updateBarMenuHover(sliceIndex);
+}
+
+function updateBarMenuHover(sliceIndex) {
+    const bm = state.barMenu;
+    const now = Date.now();
+    const { entries, totalPages } = buildBarMenuEntries();
+
+    if (sliceIndex !== bm.hoverSlice) {
+        bm.hoverSlice = sliceIndex;
+        bm.dwellStart = sliceIndex !== null ? now : null;
+        emitBarMenuState(sliceIndex, 0);
+    } else if (sliceIndex !== null) {
+        const elapsed = now - bm.dwellStart;
+        const progress = Math.min(elapsed / CONFIG.BAR_MENU_SELECT_MS, 1.0);
+        emitBarMenuState(sliceIndex, progress);
+
+        if (progress >= 1.0) {
+            const entry = entries[sliceIndex];
+            if (entry) {
+                fireBarMenuAction(entry, totalPages);
+            }
+            bm.hoverSlice = null;
+            bm.dwellStart = null;
+            emitBarMenuState(null, 0);
+        }
+    }
+}
+
+function fireBarMenuAction(entry, totalPages) {
+    if (!entry) return;
+    if (entry.type === 'action') {
+        if (entry.action === 'cancel') {
+            closeBarMenu('cancel');
+            return;
+        }
+        if (entry.action === 'prev') {
+            state.barMenu.page = (state.barMenu.page - 1 + totalPages) % totalPages;
+            state.barMenu.hoverSlice = null;
+            state.barMenu.dwellStart = null;
+            emitBarMenuState(null, 0);
+            return;
+        }
+        if (entry.action === 'next') {
+            state.barMenu.page = (state.barMenu.page + 1) % totalPages;
+            state.barMenu.hoverSlice = null;
+            state.barMenu.dwellStart = null;
+            emitBarMenuState(null, 0);
+            return;
+        }
+        return;
+    }
+
+    if (entry.type === 'item' && entry.id) {
+        state.socket.emit('bar_menu_select', { id: entry.id });
+        debugLog('bar_menu_select', { id: entry.id, label: entry.label });
+        closeBarMenu('select', CONFIG.BAR_MENU_POST_FREEZE_MS);
     }
 }
 
@@ -481,6 +1172,18 @@ function updateStatus(msg) {
 
 // ── Boot ───────────────────────────────────────────────────────────────────────
 window.onload = () => {
+    // WebGazer occasionally throws a benign DOM NotFoundError while removing
+    // internal calibration nodes. Suppress only this known signature.
+    window.addEventListener('error', (event) => {
+        const err = event && (event.error || event.message);
+        if (shouldIgnoreWebGazerDomError(err)) {
+            debugLog('ignored_global_dom_error', {
+                message: String((err && err.message) || err),
+            });
+            event.preventDefault();
+        }
+    });
+
     initSocket();
     initWebGazer();
 };
