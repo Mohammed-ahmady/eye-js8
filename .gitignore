@@ -5,6 +5,7 @@ __pycache__/
 .DS_Store
 node_modules/
 chrome.log
+workspace_tree_full.txt
 windows.zip
 windows/
 chrome_profile/
