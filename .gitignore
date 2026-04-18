@@ -8,6 +8,7 @@ chrome.log
 windows.zip
 windows/
 chrome_profile/
+chrome_profile_runtime/
 gaze_mouse_launcher.pid
 
 face_landmarker.task
