@@ -18,3 +18,4 @@ Can not load UIAutomationCore.dll.
 Can not load UIAutomationCore.dll.
 1, You may need to install Windows Update KB971513 if your OS is Windows XP, see https://github.com/yinkaisheng/WindowsUpdateKB971513ForIUIAutomation
 2, You need to use an UIAutomationInitializerInThread object if use uiautomation in a thread, see demos/uiautomation_in_thread.py
+{"ts": 1776213381.076, "src": "server_win", "event": "server_start", "port": 5000, "virtual_left": 0, "virtual_top": 0, "virtual_right": 1920, "virtual_bottom": 1080, "precision_mode": true}

@@ -2,7 +2,7 @@
 Gaze Mouse System — Windows 11 Calibration Overlay
 ====================================================
 PyQt5 replacement for the GTK3/Cairo calibration overlay.
-13-point calibration + 5-point validation, same logic as Linux version.
+13-point calibration (2 passes) + corner refinement + 5-point validation.
 """
 
 import sys
@@ -27,6 +27,16 @@ CALIBRATION_POINTS_PCT = [
     (0.025, 0.975), (0.50, 0.975), (0.975, 0.975),
 ]
 
+CORNER_REFINEMENT_POINTS_PCT = [
+    (0.02, 0.02), (0.10, 0.10),
+    (0.98, 0.02), (0.90, 0.10),
+    (0.02, 0.98), (0.10, 0.90),
+    (0.98, 0.98), (0.90, 0.90),
+]
+
+CALIBRATION_PASSES = 2
+REFINE_CORNERS_ENABLED = True
+
 VALIDATION_POINTS_PCT = [
     (0.50, 0.50),
     (0.05, 0.05), (0.95, 0.05),
@@ -35,9 +45,11 @@ VALIDATION_POINTS_PCT = [
 
 DOT_OUTER_RADIUS   = 24
 DOT_INNER_RADIUS   = 9
-FILL_DURATION_MS   = 2200
-SAMPLE_INTERVAL_MS = 100
+FILL_DURATION_MS   = 1200
+CALIBRATION_SAMPLE_AT_MS = 500
 VALIDATION_DURATION_MS = 1500
+INTER_POINT_DELAY_MS = 500
+PHASE_TRANSITION_DELAY_MS = 500
 
 
 class CalibrationOverlay(QWidget):
@@ -49,9 +61,10 @@ class CalibrationOverlay(QWidget):
         self.fill_start   = None
         self.fill_active  = False
         self.confirmed    = False
-        self._last_sample_time = 0
+        self._point_sent  = False
 
         self.mode = "CALIBRATING"
+        self.calibration_pass = 1
         self.validation_errors = []
         self.current_gaze      = None
         self.final_accuracy    = None
@@ -89,10 +102,19 @@ class CalibrationOverlay(QWidget):
     def _start_first_dot(self):
         self.fill_active = True
         self.fill_start  = time.time()
+        self._point_sent = False
+
+    def _current_points(self):
+        if self.mode == "CALIBRATING":
+            return CALIBRATION_POINTS_PCT
+        if self.mode == "CALIBRATING_PASS2":
+            return CALIBRATION_POINTS_PCT
+        if self.mode == "REFINE_CORNERS":
+            return CORNER_REFINEMENT_POINTS_PCT
+        return VALIDATION_POINTS_PCT
 
     def _current_xy(self):
-        pts = (CALIBRATION_POINTS_PCT if self.mode == "CALIBRATING"
-               else VALIDATION_POINTS_PCT)
+        pts = self._current_points()
         if self.point_index >= len(pts):
             return 0, 0
         px, py = pts[self.point_index]
@@ -107,12 +129,13 @@ class CalibrationOverlay(QWidget):
 
         elapsed = (now - self.fill_start) * 1000
 
-        if self.mode == "CALIBRATING":
-            if not self.confirmed and (now - self._last_sample_time) * 1000 >= SAMPLE_INTERVAL_MS:
-                if elapsed > 400:
-                    x, y = self._current_xy()
-                    self.sio.emit('calibrate_point', {'x': x, 'y': y})
-                    self._last_sample_time = now
+        if self.mode in ("CALIBRATING", "CALIBRATING_PASS2", "REFINE_CORNERS"):
+            # Use one clean sample per point to avoid over-weighting static labels.
+            if not self.confirmed and not self._point_sent and elapsed >= CALIBRATION_SAMPLE_AT_MS:
+                x, y = self._current_xy()
+                self.sio.emit('calibrate_point', {'x': x, 'y': y})
+                self._point_sent = True
+
             if elapsed >= FILL_DURATION_MS and not self.confirmed:
                 self.confirmed = True
                 QTimer.singleShot(250, self._move_to_next)
@@ -133,25 +156,54 @@ class CalibrationOverlay(QWidget):
         self.fill_active  = False
         self.fill_start   = None
 
-        pts = (CALIBRATION_POINTS_PCT if self.mode == "CALIBRATING"
-               else VALIDATION_POINTS_PCT)
+        pts = self._current_points()
 
         if self.point_index >= len(pts):
             if self.mode == "CALIBRATING":
-                print("[calib] Training complete. Starting validation ...")
+                if CALIBRATION_PASSES > 1:
+                    print("[calib] Training pass 1 complete. Starting pass 2 ...")
+                    self.mode = "CALIBRATING_PASS2"
+                    self.calibration_pass = 2
+                    self.point_index = 0
+                    QTimer.singleShot(PHASE_TRANSITION_DELAY_MS, self._activate_next)
+                elif REFINE_CORNERS_ENABLED:
+                    print("[calib] Training complete. Refining corners ...")
+                    self.mode = "REFINE_CORNERS"
+                    self.point_index = 0
+                    QTimer.singleShot(PHASE_TRANSITION_DELAY_MS, self._activate_next)
+                else:
+                    print("[calib] Training complete. Starting validation ...")
+                    self.sio.emit('calibration_complete', {})
+                    self.mode        = "VALIDATING"
+                    self.point_index = 0
+                    QTimer.singleShot(PHASE_TRANSITION_DELAY_MS, self._activate_next)
+            elif self.mode == "CALIBRATING_PASS2":
+                if REFINE_CORNERS_ENABLED:
+                    print("[calib] Training pass 2 complete. Refining corners ...")
+                    self.mode = "REFINE_CORNERS"
+                    self.point_index = 0
+                    QTimer.singleShot(PHASE_TRANSITION_DELAY_MS, self._activate_next)
+                else:
+                    print("[calib] Training complete. Starting validation ...")
+                    self.sio.emit('calibration_complete', {})
+                    self.mode        = "VALIDATING"
+                    self.point_index = 0
+                    QTimer.singleShot(PHASE_TRANSITION_DELAY_MS, self._activate_next)
+            elif self.mode == "REFINE_CORNERS":
+                print("[calib] Corner refinement complete. Starting validation ...")
                 self.sio.emit('calibration_complete', {})
                 self.mode        = "VALIDATING"
                 self.point_index = 0
-                QTimer.singleShot(1000, self._activate_next)
+                QTimer.singleShot(PHASE_TRANSITION_DELAY_MS, self._activate_next)
             else:
                 self._finish()
         else:
-            QTimer.singleShot(400, self._activate_next)
+            QTimer.singleShot(INTER_POINT_DELAY_MS, self._activate_next)
 
     def _activate_next(self):
-        self.fill_active       = True
-        self.fill_start        = time.time()
-        self._last_sample_time = 0
+        self.fill_active = True
+        self.fill_start  = time.time()
+        self._point_sent = False
 
     def paintEvent(self, event):
         painter = QPainter(self)
@@ -174,8 +226,17 @@ class CalibrationOverlay(QWidget):
         painter.setPen(QColor(255, 255, 255, 204))
 
         if self.mode == "CALIBRATING":
-            label = f"Training Point {self.point_index + 1} of {len(CALIBRATION_POINTS_PCT)}"
+            label = (f"Training Pass 1: Point {self.point_index + 1} of "
+                     f"{len(CALIBRATION_POINTS_PCT)}")
             sub   = "Look directly at the red dot"
+        elif self.mode == "CALIBRATING_PASS2":
+            label = (f"Training Pass 2: Point {self.point_index + 1} of "
+                     f"{len(CALIBRATION_POINTS_PCT)}")
+            sub   = "Hold steady for stronger fit"
+        elif self.mode == "REFINE_CORNERS":
+            label = (f"Refine Corners: Point {self.point_index + 1} of "
+                     f"{len(CORNER_REFINEMENT_POINTS_PCT)}")
+            sub   = "Focus on corner accuracy"
         else:
             label = f"Accuracy Check {self.point_index + 1} of {len(VALIDATION_POINTS_PCT)}"
             sub   = "Stay focused for precision measurement"
@@ -202,10 +263,11 @@ class CalibrationOverlay(QWidget):
         # Progress arc
         if self.fill_active and self.fill_start is not None:
             elapsed = (time.time() - self.fill_start) * 1000
-            dur     = FILL_DURATION_MS if self.mode == "CALIBRATING" else VALIDATION_DURATION_MS
+            dur     = (FILL_DURATION_MS if self.mode in ("CALIBRATING", "CALIBRATING_PASS2", "REFINE_CORNERS")
+                       else VALIDATION_DURATION_MS)
             progress = min(elapsed / dur, 1.0)
 
-            if self.mode == "CALIBRATING":
+            if self.mode in ("CALIBRATING", "CALIBRATING_PASS2", "REFINE_CORNERS"):
                 arc_color = QColor(46, 217, 115, 242)
             else:
                 arc_color = QColor(51, 179, 255, 242)

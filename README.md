@@ -21,12 +21,21 @@ Designed as assistive technology for fully paralyzed users.
 
 ## How It Works
 
-1. Chrome launches hidden offscreen at (-32000, -32000)
+1. Chrome launches hidden offscreen at (-32000, -32000) using a per-run profile
 2. WebGazer.js captures webcam frames and predicts gaze coordinates
 3. Gaze coordinates are sent via Socket.IO to the Python backend
-4. Python moves the OS cursor using pyautogui
-5. UIAutomation snaps the cursor to nearby clickable UI elements
-6. A PyQt5 HUD overlay shows the gaze ring and dwell progress
+4. Backend smooths gaze and runs precision-assist targeting + bar context scan
+5. UIAutomation triggers click actions (optionally without moving the OS cursor)
+6. A PyQt5 HUD overlay shows the gaze ring, precision bubble, and menus
+
+---
+
+## Windows Branch Highlights
+
+- Precision assist (bubble pointer) locks on nearby UI elements for easier targeting
+- Bar menu for toolbars/taskbar with radial selection, paging, and zoom preview
+- Calibration upgrades: two passes + corner refinement, stability sampling, and validation gate
+- WebGazer startup: camera probe + auto-retry, optional raw direct mode, debug logging
 
 ---
 
@@ -50,7 +59,9 @@ eye-js8/
 │   ├── download_model.bat
 │   └── start.bat
 ├── docs/                  # Documentation
-│   └── FIX_LOG.md         # Full bug fix history
+│   ├── FIX_LOG.md         # Full bug fix history
+│   ├── hud_runtime_log.jsonl        # Runtime HUD telemetry (generated)
+│   └── precision_runtime_log.jsonl  # Precision telemetry (generated)
 ├── linux_reference/       # Original Linux files (reference only)
 ├── tests/
 └── face_landmarker.task   # MediaPipe model (download separately)
@@ -60,22 +71,23 @@ eye-js8/
 
 ## Setup (Windows 11)
 
-### 1. Install Python dependencies
+### Option A: One-step installer (recommended)
+```bat
+scripts\install_win.bat
+```
+
+### Option B: Manual steps
+1. Install Python dependencies
 ```bash
 pip install -r requirements_win.txt
 ```
 
-### 2. Download MediaPipe model
+2. Download MediaPipe model
 ```bash
 scripts\download_model.bat
 ```
 
-### 3. Install additional requirements
-```bash
-scripts\install_win.bat
-```
-
-### 4. Run the system
+### Run the system
 ```bash
 scripts\start.bat
 ```
@@ -135,9 +147,16 @@ See `docs/FIX_LOG.md` for full details.
 ## Calibration
 
 1. System launches automatically with calibration overlay
-2. Look at each dot on screen for 2 seconds
-3. After calibration, gaze control activates immediately
-4. Dwell (hold gaze) on any element for 1.5 seconds to click
+2. Two training passes + corner refinement run in sequence
+3. Validation runs next (gaze preview only, actions disabled)
+4. After validation, gaze actions enable and dwell click works
+
+---
+
+## Runtime Logs
+
+- HUD telemetry: `docs/hud_runtime_log.jsonl`
+- Precision telemetry: `docs/precision_runtime_log.jsonl`
 
 ---
 

@@ -5,9 +5,11 @@ __pycache__/
 .DS_Store
 node_modules/
 chrome.log
+workspace_tree_full.txt
 windows.zip
 windows/
 chrome_profile/
+chrome_profile_runtime/
 gaze_mouse_launcher.pid
 
 face_landmarker.task
