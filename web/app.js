@@ -51,8 +51,8 @@ const CONFIG = {
 
     BAR_MENU_OPEN_MS: 700,
     BAR_MENU_SELECT_MS: 3000,
-    BAR_MENU_POST_FREEZE_MS: 600,
-    BAR_MENU_PAGE_SIZE: 10,
+    BAR_MENU_POST_FREEZE_MS: 1000,
+    BAR_MENU_PAGE_SIZE: 8,
     BAR_MENU_STALE_MS: 2200,
     BAR_MENU_MAX_ITEMS: 40,
     BAR_MENU_DEADZONE: 60,
@@ -63,7 +63,6 @@ const CONFIG = {
 // ── State ──────────────────────────────────────────────────────────────────────
 const state = {
     isReady: false,   // true once calibration_done received
-    actionsEnabled: false,
     smoothed: { x: 0, y: 0 },
     dwellStart: null,
     dwellAnchor: { x: 0, y: 0 },
@@ -79,7 +78,6 @@ const state = {
     webgazerStarted: false,
     webgazerStarting: false,
     pendingCalibrationDone: false,
-    pendingValidationDone: false,
     webgazerRetryTimer: null,
     webgazerRetryCount: 0,
     
@@ -184,27 +182,11 @@ function scheduleCalibrationSample(x, y) {
 }
 
 
-function setActionsEnabled(enabled) {
-    state.actionsEnabled = !!enabled;
-    if (!state.actionsEnabled) {
-        if (state.radialMenu.active) {
-            closeRadialMenu('disabled');
-        }
-        if (state.barMenu.active) {
-            closeBarMenu('disabled');
-        }
-    }
-    if (state.socket && state.socket.connected) {
-        state.socket.emit('actions_state', { enabled: state.actionsEnabled });
-    }
-}
-
 function activateGazeControl() {
-    console.log('[calib] calibration complete — gaze preview active');
+    console.log('[calib] calibration complete — gaze streaming active');
     state.isReady = true;
-    setActionsEnabled(false);
     debugLog('calibration_done');
-    updateStatus('Validation running — gaze preview');
+    updateStatus('Gaze control active');
 
     // Save only when persistence mode is explicitly enabled.
     if (CONFIG.PERSIST_MODEL_ACROSS_SESSIONS && webgazer.saveDataAcrossSessions) {
@@ -220,13 +202,6 @@ function activateGazeControl() {
             console.warn('[wakeLock] not available:', err.message);
         });
     }
-}
-
-function enableGazeActions() {
-    if (!state.isReady) return;
-    setActionsEnabled(true);
-    debugLog('validation_done');
-    updateStatus('Gaze control active');
 }
 
 
@@ -377,10 +352,6 @@ async function startWebGazerRuntime() {
                 state.pendingCalibrationDone = false;
                 activateGazeControl();
             }
-            if (state.pendingValidationDone) {
-                state.pendingValidationDone = false;
-                enableGazeActions();
-            }
         })
         .catch(err => {
             state.webgazerStarting = false;
@@ -418,7 +389,6 @@ function initSocket() {
         state.socket.emit('register', { type: 'browser' });
         debugLog('socket_connect', { rawMode: CONFIG.RAW_DIRECT_MODE });
         updateStatus('Waiting for native calibration ...');
-        state.socket.emit('actions_state', { enabled: state.actionsEnabled });
     });
 
     state.socket.on('disconnect', () => {
@@ -434,7 +404,6 @@ function initSocket() {
         // Any new calibration point means we are in an active calibration phase.
         if (state.isReady || state.radialMenu.active || state.barMenu.active) {
             state.isReady = false;
-            setActionsEnabled(false);
             state.dwellStart = null;
             state.dwellExitTime = null;
             updateDwellRing(null, null, 0);
@@ -467,15 +436,6 @@ function initSocket() {
         activateGazeControl();
     });
 
-    state.socket.on('native_validation_done', () => {
-        if (!state.webgazerStarted) {
-            state.pendingValidationDone = true;
-            debugLog('validation_done_deferred', { reason: 'webgazer_not_started' });
-            return;
-        }
-        enableGazeActions();
-    });
-
     // ── Snap / release feedback ───────────────────────────────────────────────
     state.socket.on('snapped', (data) => {
         state.isLocked = true;
@@ -499,16 +459,18 @@ function initSocket() {
     state.socket.on('bar_context', (data) => {
         if (!data || typeof data !== 'object') return;
         const items = Array.isArray(data.items) ? data.items : [];
+
+        // Once menu is open, ignore inactive context refreshes so selection stays stable.
+        if (state.barMenu.active && !data.active) {
+            return;
+        }
+
         state.barContext.active = !!data.active;
         state.barContext.barType = data.bar_type || '';
         state.barContext.barLabel = data.bar_label || '';
         state.barContext.pageSize = data.page_size || CONFIG.BAR_MENU_PAGE_SIZE;
         state.barContext.items = items.slice(0, CONFIG.BAR_MENU_MAX_ITEMS);
         state.barContext.ts = Date.now();
-
-        if (!state.barContext.active && state.barMenu.active) {
-            closeBarMenu('context_lost');
-        }
 
         if (state.barMenu.active) {
             syncBarMenuItems();
@@ -600,11 +562,6 @@ function applyCenterBiasCorrection(x, y) {
 function onGaze(rawX, rawY) {
     if (!isFinite(rawX) || !isFinite(rawY)) return;
 
-    if (state.barMenu.active) {
-        handleBarMenuGaze(rawX, rawY);
-        return;
-    }
-
     const now = Date.now();
     state.gazeHistory.push({ x: rawX, y: rawY, ts: now });
     const cutoff = now - CONFIG.CALIBRATION_STABILITY_WINDOW_MS;
@@ -614,7 +571,14 @@ function onGaze(rawX, rawY) {
 
     if (!state.isReady || state.isPaused) return;
 
-    if (isBarMenuFrozen()) {
+    // Fully freeze normal gaze/cursor flow while bar menu is open.
+    // Only directional selection logic is allowed during this mode.
+    if (state.barMenu.active) {
+        handleBarMenuGaze(rawX, rawY);
+        return;
+    }
+
+    if (!state.barMenu.active && isBarMenuFrozen()) {
         return;
     }
 
@@ -650,14 +614,12 @@ function onGaze(rawX, rawY) {
     state.smoothed.x = x;
     state.smoothed.y = y;
 
-    if (state.actionsEnabled) {
-        if (state.radialMenu.active) {
-            handleRadialMenuGaze(x, y);
-        } else if (isBarContextActive()) {
-            handleBarHover(x, y);
-        } else {
-            handleDwell(x, y);
-        }
+    if (state.radialMenu.active) {
+        handleRadialMenuGaze(x, y);
+    } else if (isBarContextActive()) {
+        handleBarHover(x, y);
+    } else {
+        handleDwell(x, y);
     }
 
     // Throttle emissions to ~30 fps
@@ -1071,10 +1033,6 @@ function handleBarHover() {
 }
 
 function handleBarMenuGaze(rawX, rawY) {
-    if (!isBarContextActive()) {
-        closeBarMenu('stale');
-        return;
-    }
     const bm = state.barMenu;
     const dx = rawX - bm.x;
     const dy = rawY - bm.y;

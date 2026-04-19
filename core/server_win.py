@@ -127,9 +127,7 @@ _calibration_sid = None
 _hud_sid         = None
 _pending_calibration_points = []
 _calibration_done_pending   = False
-_validation_done_pending    = False
 _registry_lock   = threading.Lock()
-_actions_enabled = True
 _last_scan_ms = 0
 _cached_snap_target = None
 _scan_inflight = False
@@ -985,9 +983,6 @@ def on_connect():
             if _calibration_done_pending:
                 sio.emit('native_calibration_done', {}, to=sid)
                 _calibration_done_pending = False
-            if _validation_done_pending:
-                sio.emit('native_validation_done', {}, to=sid)
-                _validation_done_pending = False
 
 
 @sio.on('disconnect')
@@ -1063,9 +1058,6 @@ def on_webgazer_ready(data):
         if _calibration_done_pending:
             sio.emit('native_calibration_done', {}, to=sid)
             _calibration_done_pending = False
-        if _validation_done_pending:
-            sio.emit('native_validation_done', {}, to=sid)
-            _validation_done_pending = False
         elif _calibration_sid:
             sio.emit('browser_ready', {}, to=_calibration_sid)
 
@@ -1085,7 +1077,7 @@ def on_calibrate_point(data):
 
 @sio.on('calibration_complete')
 def on_calibration_complete(data):
-    global _calibration_done_pending, _pose_baseline, _latest_pose, _actions_enabled
+    global _calibration_done_pending, _pose_baseline, _latest_pose
     with _registry_lock:
         bsid = _browser_sid
     if bsid:
@@ -1101,29 +1093,6 @@ def on_calibration_complete(data):
         _pose_baseline = dict(_latest_pose) if _latest_pose is not None else {'yaw': 0.0, 'pitch': 0.0}
         baseline_snapshot = dict(_pose_baseline)
     print(f"[pose] Baseline set: {baseline_snapshot}")
-    _actions_enabled = False
-
-
-@sio.on('validation_complete')
-def on_validation_complete(data):
-    global _validation_done_pending, _actions_enabled
-    with _registry_lock:
-        bsid = _browser_sid
-    if bsid:
-        sio.emit('native_validation_done', {}, to=bsid)
-        _validation_done_pending = False
-    else:
-        _validation_done_pending = True
-    _actions_enabled = True
-
-
-@sio.on('actions_state')
-def on_actions_state(data):
-    global _actions_enabled
-    if not isinstance(data, dict):
-        return
-    _actions_enabled = bool(data.get('enabled', True))
-    log_event('actions_state', enabled=_actions_enabled)
 
 
 _gaze_logged = False
@@ -1230,23 +1199,19 @@ def on_move_mouse(data):
         is_over_clickable = candidate is not None
         state._hover_target = (candidate['x'], candidate['y']) if candidate else None
 
-        # Dwell calculation (disabled during validation)
+        # Dwell calculation
+        dx = bubble_x - state.dwell_anchor[0]
+        dy = bubble_y - state.dwell_anchor[1]
         dwell_pct = 0.0
-        if _actions_enabled:
-            dx = bubble_x - state.dwell_anchor[0]
-            dy = bubble_y - state.dwell_anchor[1]
-            if dx*dx + dy*dy < state.dwell_radius**2:
-                if not state.dwell_start:
-                    state.dwell_start  = now_ts
-                    state.dwell_anchor = (bubble_x, bubble_y)
-                else:
-                    elapsed   = now_ts - state.dwell_start
-                    dwell_pct = min(elapsed / state.dwell_time, 1.0)
-            else:
+        if dx*dx + dy*dy < state.dwell_radius**2:
+            if not state.dwell_start:
                 state.dwell_start  = now_ts
                 state.dwell_anchor = (bubble_x, bubble_y)
+            else:
+                elapsed   = now_ts - state.dwell_start
+                dwell_pct = min(elapsed / state.dwell_time, 1.0)
         else:
-            state.dwell_start = None
+            state.dwell_start  = now_ts
             state.dwell_anchor = (bubble_x, bubble_y)
 
         # Relay to HUD

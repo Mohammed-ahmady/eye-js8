@@ -334,10 +334,6 @@ class CalibrationOverlay(QWidget):
             self.final_accuracy = sum(self.validation_errors) / len(self.validation_errors)
         self.mode = "DONE"
         self.update()
-        try:
-            self.sio.emit('validation_complete', {'accuracy': self.final_accuracy})
-        except Exception:
-            pass
         QTimer.singleShot(2000, QApplication.quit)
 
 
